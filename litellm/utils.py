@@ -5143,6 +5143,7 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
             "max_tokens",
             "tools",
             "tool_choice",
+            "response_format",
         ]
     elif custom_llm_provider == "replicate":
         return [
@@ -7410,7 +7411,9 @@ def exception_type(
                         model=model,
                         response=original_exception.response,
                     )
-            elif custom_llm_provider == "cohere":  # Cohere
+            elif (
+                custom_llm_provider == "cohere" or custom_llm_provider == "cohere_chat"
+            ):  # Cohere
                 if (
                     "invalid api token" in error_str
                     or "No API key provided." in error_str
@@ -8543,6 +8546,29 @@ class CustomStreamWrapper:
         except:
             raise ValueError(f"Unable to parse response. Original response: {chunk}")
 
+    def handle_cohere_chat_chunk(self, chunk):
+        chunk = chunk.decode("utf-8")
+        data_json = json.loads(chunk)
+        print_verbose(f"chunk: {chunk}")
+        try:
+            text = ""
+            is_finished = False
+            finish_reason = ""
+            if "text" in data_json:
+                text = data_json["text"]
+            elif "is_finished" in data_json and data_json["is_finished"] == True:
+                is_finished = data_json["is_finished"]
+                finish_reason = data_json["finish_reason"]
+            else:
+                return
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
+        except:
+            raise ValueError(f"Unable to parse response. Original response: {chunk}")
+
     def handle_azure_chunk(self, chunk):
         is_finished = False
         finish_reason = ""
@@ -8653,6 +8679,27 @@ class CustomStreamWrapper:
             }
         except Exception as e:
             traceback.print_exc()
+            raise e
+
+    def handle_azure_text_completion_chunk(self, chunk):
+        try:
+            print_verbose(f"\nRaw OpenAI Chunk\n{chunk}\n")
+            text = ""
+            is_finished = False
+            finish_reason = None
+            choices = getattr(chunk, "choices", [])
+            if len(choices) > 0:
+                text = choices[0].text
+                if choices[0].finish_reason is not None:
+                    is_finished = True
+                    finish_reason = choices[0].finish_reason
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
+
+        except Exception as e:
             raise e
 
     def handle_openai_text_completion_chunk(self, chunk):
@@ -9051,6 +9098,15 @@ class CustomStreamWrapper:
                     model_response.choices[0].finish_reason = response_obj[
                         "finish_reason"
                     ]
+            elif self.custom_llm_provider == "cohere_chat":
+                response_obj = self.handle_cohere_chat_chunk(chunk)
+                if response_obj is None:
+                    return
+                completion_obj["content"] = response_obj["text"]
+                if response_obj["is_finished"]:
+                    model_response.choices[0].finish_reason = response_obj[
+                        "finish_reason"
+                    ]
             elif self.custom_llm_provider == "bedrock":
                 if self.sent_last_chunk:
                     raise StopIteration
@@ -9122,6 +9178,14 @@ class CustomStreamWrapper:
                     ]
             elif self.custom_llm_provider == "text-completion-openai":
                 response_obj = self.handle_openai_text_completion_chunk(chunk)
+                completion_obj["content"] = response_obj["text"]
+                print_verbose(f"completion obj content: {completion_obj['content']}")
+                if response_obj["is_finished"]:
+                    model_response.choices[0].finish_reason = response_obj[
+                        "finish_reason"
+                    ]
+            elif self.custom_llm_provider == "azure_text":
+                response_obj = self.handle_azure_text_completion_chunk(chunk)
                 completion_obj["content"] = response_obj["text"]
                 print_verbose(f"completion obj content: {completion_obj['content']}")
                 if response_obj["is_finished"]:
@@ -9405,6 +9469,7 @@ class CustomStreamWrapper:
                 or self.custom_llm_provider == "azure"
                 or self.custom_llm_provider == "custom_openai"
                 or self.custom_llm_provider == "text-completion-openai"
+                or self.custom_llm_provider == "azure_text"
                 or self.custom_llm_provider == "huggingface"
                 or self.custom_llm_provider == "ollama"
                 or self.custom_llm_provider == "ollama_chat"
