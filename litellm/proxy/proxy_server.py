@@ -353,17 +353,32 @@ async def user_api_key_auth(
 
         ### CHECK IF ADMIN ###
         # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
+        ### CHECK IF ADMIN ###
+        # note: never string compare api keys, this is vulenerable to a time attack. Use secrets.compare_digest instead
+        ## Check CACHE
+        valid_token = user_api_key_cache.get_cache(key=hash_token(api_key))
+        if (
+            valid_token is not None
+            and isinstance(valid_token, UserAPIKeyAuth)
+            and valid_token.user_role == "proxy_admin"
+        ):
+            return valid_token
+
         try:
             is_master_key_valid = ph.verify(litellm_master_key_hash, api_key)
         except Exception as e:
             is_master_key_valid = False
 
         if is_master_key_valid:
-            return UserAPIKeyAuth(
+            _user_api_key_obj = UserAPIKeyAuth(
                 api_key=master_key,
                 user_role="proxy_admin",
                 user_id=litellm_proxy_admin_name,
             )
+            user_api_key_cache.set_cache(
+                key=hash_token(master_key), value=_user_api_key_obj
+            )
+            return _user_api_key_obj
 
         if isinstance(
             api_key, str
@@ -1813,8 +1828,6 @@ class ProxyConfig:
                 custom_db_client = DBClient(
                     custom_db_args=database_args, custom_db_type=database_type
                 )
-            ## COST TRACKING ##
-            cost_tracking()
             ## ADMIN UI ACCESS ##
             ui_access_mode = general_settings.get(
                 "ui_access_mode", "all"
@@ -2368,6 +2381,10 @@ async def startup_event():
         # if not, assume it's a json string
         worker_config = json.loads(os.getenv("WORKER_CONFIG"))
         await initialize(**worker_config)
+
+    ## COST TRACKING ##
+    cost_tracking()
+
     proxy_logging_obj._init_litellm_callbacks()  # INITIALIZE LITELLM CALLBACKS ON SERVER STARTUP <- do this to catch any logging errors on startup, not when calls are being made
 
     if use_background_health_checks:

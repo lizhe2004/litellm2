@@ -3841,7 +3841,9 @@ def completion_cost(
                     * n
                 )
             else:
-                raise Exception(f"Model={model} not found in completion cost model map")
+                raise Exception(
+                    f"Model={image_gen_model_name} not found in completion cost model map"
+                )
         # Calculate cost based on prompt_tokens, completion_tokens
         if (
             "togethercomputer" in model
@@ -5371,6 +5373,9 @@ def get_llm_provider(
         ## cohere
         elif model in litellm.cohere_models or model in litellm.cohere_embedding_models:
             custom_llm_provider = "cohere"
+        ## cohere chat models
+        elif model in litellm.cohere_chat_models:
+            custom_llm_provider = "cohere_chat"
         ## replicate
         elif model in litellm.replicate_models or (":" in model and len(model) > 64):
             model_parts = model.split(":")
@@ -6422,7 +6427,7 @@ def convert_to_model_response_object(
                     "system_fingerprint"
                 ]
 
-            if "model" in response_object:
+            if "model" in response_object and model_response_object.model is None:
                 model_response_object.model = response_object["model"]
 
             if start_time is not None and end_time is not None:
