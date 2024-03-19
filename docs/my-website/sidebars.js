@@ -65,14 +65,8 @@ const sidebars = {
             "proxy/streaming_logging",
           ]
         },
-        {
-          "type": "category",
-          "label": "Content Moderation",
-          "items": [
-            "proxy/call_hooks",
-            "proxy/rules",
-          ]
-        },
+        "proxy/call_hooks",
+        "proxy/rules",
         "proxy/deploy", 
         "proxy/cli", 
       ]
@@ -138,6 +132,7 @@ const sidebars = {
         "providers/ollama", 
         "providers/perplexity", 
         "providers/groq", 
+        "providers/fireworks_ai", 
         "providers/vllm", 
         "providers/xinference", 
         "providers/cloudflare_workers", 

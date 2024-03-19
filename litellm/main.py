@@ -196,10 +196,10 @@ async def acompletion(
         api_version (str, optional): API version (default is None).
         api_key (str, optional): API key (default is None).
         model_list (list, optional): List of api base, version, keys
+        timeout (float, optional): The maximum execution time in seconds for the completion request.
 
         LITELLM Specific Params
         mock_response (str, optional): If provided, return a mock completion response for testing or debugging purposes (default is None).
-        force_timeout (int, optional): The maximum execution time in seconds for the completion request (default is 600).
         custom_llm_provider (str, optional): Used for Non-OpenAI LLMs, Example usage for bedrock, set model="amazon.titan-tg1-large" and custom_llm_provider="bedrock"
     Returns:
         ModelResponse: A response object containing the generated completion and associated metadata.
@@ -892,6 +892,7 @@ def completion(
             or custom_llm_provider == "mistral"
             or custom_llm_provider == "openai"
             or custom_llm_provider == "together_ai"
+            or custom_llm_provider in litellm.openai_compatible_providers
             or "ft:gpt-3.5-turbo" in model  # finetune gpt-3.5-turbo
         ):  # allow user to make an openai call with a custom base
             # note: if a user sets a custom base - we should ensure this works
@@ -1780,9 +1781,11 @@ def completion(
             ## RESPONSE OBJECT
             response = response
         elif custom_llm_provider == "vllm":
+            custom_prompt_dict = custom_prompt_dict or litellm.custom_prompt_dict
             model_response = vllm.completion(
                 model=model,
                 messages=messages,
+                custom_prompt_dict=custom_prompt_dict,
                 model_response=model_response,
                 print_verbose=print_verbose,
                 optional_params=optional_params,
@@ -2394,6 +2397,7 @@ async def aembedding(*args, **kwargs):
             or custom_llm_provider == "deepinfra"
             or custom_llm_provider == "perplexity"
             or custom_llm_provider == "groq"
+            or custom_llm_provider == "fireworks_ai"
             or custom_llm_provider == "ollama"
             or custom_llm_provider == "vertex_ai"
         ):  # currently implemented aiohttp calls for just azure and openai, soon all.
@@ -2893,6 +2897,7 @@ async def atext_completion(*args, **kwargs):
             or custom_llm_provider == "deepinfra"
             or custom_llm_provider == "perplexity"
             or custom_llm_provider == "groq"
+            or custom_llm_provider == "fireworks_ai"
             or custom_llm_provider == "text-completion-openai"
             or custom_llm_provider == "huggingface"
             or custom_llm_provider == "ollama"
@@ -3683,11 +3688,12 @@ async def ahealth_check(
                 response = {}  # args like remaining ratelimit etc.
         return response
     except Exception as e:
+        traceback.print_exc()
         if model not in litellm.model_cost and mode is None:
             raise Exception(
                 "Missing `mode`. Set the `mode` for the model - https://docs.litellm.ai/docs/proxy/health#embedding-models"
             )
-        return {"error": str(e)}
+        return {"error": f"{str(e)}"}
 
 
 ####### HELPER FUNCTIONS ################
