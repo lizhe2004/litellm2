@@ -38,6 +38,11 @@ model_list:
       model: bedrock/anthropic.claude-3-sonnet-20240229-v1:0
       aws_access_key_id: os.environ/AWS_ACCESS_KEY_ID
       aws_secret_access_key: os.environ/AWS_SECRET_ACCESS_KEY
+  - model_name: together-Qwen1.5-72B-Chat
+    litellm_params:
+      model: together_ai/Qwen/Qwen1.5-72B-Chat
+#     key_id: os.environ/TOGETHERAI_API_KEY
+ 
 litellm_settings:
   drop_params: True
   max_budget: 100 
