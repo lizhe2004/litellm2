@@ -106,6 +106,7 @@ from litellm.proxy._types import *
 from litellm.caching import DualCache
 from litellm.proxy.health_check import perform_health_check
 from litellm._logging import verbose_router_logger, verbose_proxy_logger
+from litellm.proxy.auth.handle_jwt import JWTHandler
 
 try:
     from litellm._version import version
@@ -281,6 +282,8 @@ proxy_budget_rescheduler_min_time = 597
 proxy_budget_rescheduler_max_time = 605
 proxy_batch_write_at = 60  # in seconds
 litellm_master_key_hash = None
+disable_spend_logs = False
+jwt_handler = JWTHandler()
 ### INITIALIZE GLOBAL LOGGING OBJECT ###
 proxy_logging_obj = ProxyLogging(user_api_key_cache=user_api_key_cache)
 ### REDIS QUEUE ###
@@ -333,6 +336,45 @@ async def user_api_key_auth(
             return UserAPIKeyAuth.model_validate(response)
 
         ### LITELLM-DEFINED AUTH FUNCTION ###
+        #### IF JWT ####
+        """
+        LiteLLM supports using JWTs. 
+
+        Enable this in proxy config, by setting 
+        ```
+        general_settings:
+            enable_jwt_auth: true
+        ```
+        """
+        if general_settings.get("enable_jwt_auth", False) == True:
+            is_jwt = jwt_handler.is_jwt(token=api_key)
+            verbose_proxy_logger.debug(f"is_jwt: {is_jwt}")
+            if is_jwt:
+                # check if valid token
+                valid_token = await jwt_handler.auth_jwt(token=api_key)
+                # get scopes
+                scopes = jwt_handler.get_scopes(token=valid_token)
+                # check if admin
+                is_admin = jwt_handler.is_admin(scopes=scopes)
+                # get user id
+                user_id = jwt_handler.get_user_id(
+                    token=valid_token, default_value=litellm_proxy_admin_name
+                )
+                # if admin return
+                if is_admin:
+                    _user_api_key_obj = UserAPIKeyAuth(
+                        api_key=api_key,
+                        user_role="proxy_admin",
+                        user_id=user_id,
+                    )
+                    user_api_key_cache.set_cache(
+                        key=hash_token(api_key), value=_user_api_key_obj
+                    )
+
+                    return _user_api_key_obj
+            else:
+                raise Exception("Invalid key error!")
+        #### ELSE ####
         if master_key is None:
             if isinstance(api_key, str):
                 return UserAPIKeyAuth(api_key=api_key)
@@ -1295,7 +1337,8 @@ async def update_database(
         asyncio.create_task(_update_key_db())
         asyncio.create_task(_update_team_db())
         # asyncio.create_task(_insert_spend_log_to_db())
-        await _insert_spend_log_to_db()
+        if disable_spend_logs == False:
+            await _insert_spend_log_to_db()
 
         verbose_proxy_logger.debug("Runs spend update on all tables")
     except Exception as e:
@@ -1614,7 +1657,7 @@ class ProxyConfig:
         """
         Load config values into proxy global state
         """
-        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode, litellm_master_key_hash, proxy_batch_write_at
+        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode, litellm_master_key_hash, proxy_batch_write_at, disable_spend_logs
 
         # Load existing config
         config = await self.get_config(config_file_path=config_file_path)
@@ -1829,6 +1872,15 @@ class ProxyConfig:
                         # these are litellm callbacks - "langfuse", "sentry", "wandb"
                         else:
                             litellm.success_callback.append(callback)
+                            if "prometheus" in callback:
+                                verbose_proxy_logger.debug(
+                                    "Starting Prometheus Metrics on /metrics"
+                                )
+                                from prometheus_client import make_asgi_app
+
+                                # Add prometheus asgi middleware to route /metrics requests
+                                metrics_app = make_asgi_app()
+                                app.mount("/metrics", metrics_app)
                     print(  # noqa
                         f"{blue_color_code} Initialized Success Callbacks - {litellm.success_callback} {reset_color_code}"
                     )  # noqa
@@ -1981,6 +2033,10 @@ class ProxyConfig:
             ## BATCH WRITER ##
             proxy_batch_write_at = general_settings.get(
                 "proxy_batch_write_at", proxy_batch_write_at
+            )
+            ## DISABLE SPEND LOGS ## - gives a perf improvement
+            disable_spend_logs = general_settings.get(
+                "disable_spend_logs", disable_spend_logs
             )
             ### BACKGROUND HEALTH CHECKS ###
             # Enable background health checks
@@ -7525,7 +7581,27 @@ async def get_routes():
     return {"routes": routes}
 
 
-## TEST ENDPOINT
+#### TEST ENDPOINTS ####
+@router.get("/token/generate", dependencies=[Depends(user_api_key_auth)])
+async def token_generate():
+    """
+    Test endpoint. Meant for generating admin tokens with specific claims and testing if they work for creating keys, etc.
+    """
+    # Initialize AuthJWTSSO with your OpenID Provider configuration
+    from fastapi_sso import AuthJWTSSO
+
+    auth_jwt_sso = AuthJWTSSO(
+        issuer=os.getenv("OPENID_BASE_URL"),
+        client_id=os.getenv("OPENID_CLIENT_ID"),
+        client_secret=os.getenv("OPENID_CLIENT_SECRET"),
+        scopes=["litellm_proxy_admin"],
+    )
+
+    token = auth_jwt_sso.create_access_token()
+
+    return {"token": token}
+
+
 # @router.post("/update_database", dependencies=[Depends(user_api_key_auth)])
 # async def update_database_endpoint(
 #     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),

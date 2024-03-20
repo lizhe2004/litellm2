@@ -1865,15 +1865,14 @@ async def update_spend(
     team_list: list,
     spend_logs: list,
     """
-    verbose_proxy_logger.debug(
-        f"ENTERS UPDATE SPEND -  len(prisma_client.user_list_transactons.keys()): {len(prisma_client.user_list_transactons.keys())}"
-    )
     n_retry_times = 3
     ### UPDATE USER TABLE ###
     if len(prisma_client.user_list_transactons.keys()) > 0:
         for i in range(n_retry_times + 1):
             try:
-                async with prisma_client.db.tx(timeout=6000) as transaction:
+                async with prisma_client.db.tx(
+                    timeout=timedelta(seconds=60)
+                ) as transaction:
                     async with transaction.batch_() as batcher:
                         for (
                             user_id,
@@ -1898,7 +1897,9 @@ async def update_spend(
     if len(prisma_client.end_user_list_transactons.keys()) > 0:
         for i in range(n_retry_times + 1):
             try:
-                async with prisma_client.db.tx(timeout=6000) as transaction:
+                async with prisma_client.db.tx(
+                    timeout=timedelta(seconds=60)
+                ) as transaction:
                     async with transaction.batch_() as batcher:
                         for (
                             end_user_id,
@@ -1929,7 +1930,9 @@ async def update_spend(
     if len(prisma_client.key_list_transactons.keys()) > 0:
         for i in range(n_retry_times + 1):
             try:
-                async with prisma_client.db.tx(timeout=6000) as transaction:
+                async with prisma_client.db.tx(
+                    timeout=timedelta(seconds=60)
+                ) as transaction:
                     async with transaction.batch_() as batcher:
                         for (
                             token,
@@ -1954,7 +1957,9 @@ async def update_spend(
     if len(prisma_client.team_list_transactons.keys()) > 0:
         for i in range(n_retry_times + 1):
             try:
-                async with prisma_client.db.tx(timeout=6000) as transaction:
+                async with prisma_client.db.tx(
+                    timeout=timedelta(seconds=60)
+                ) as transaction:
                     async with transaction.batch_() as batcher:
                         for (
                             team_id,
@@ -1974,8 +1979,6 @@ async def update_spend(
                 await asyncio.sleep(2**i)  # Exponential backoff
             except Exception as e:
                 raise e
-
-    ### UPDATE SPEND LOGS TABLE ###
 
 
 async def monitor_spend_list(prisma_client: PrismaClient):
