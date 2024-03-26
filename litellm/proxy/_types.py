@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Extra, Field, root_validator, Json
+from pydantic import BaseModel, Extra, Field, root_validator, Json, validator
 import enum
 from typing import Optional, List, Union, Dict, Literal, Any
 from datetime import datetime
@@ -12,11 +12,6 @@ def hash_token(token: str):
     hashed_token = hashlib.sha256(token.encode()).hexdigest()
 
     return hashed_token
-
-
-class LiteLLMProxyRoles(enum.Enum):
-    PROXY_ADMIN = "litellm_proxy_admin"
-    USER = "litellm_user"
 
 
 class LiteLLMBase(BaseModel):
@@ -40,6 +35,44 @@ class LiteLLMBase(BaseModel):
 
     class Config:
         protected_namespaces = ()
+
+
+class LiteLLMProxyRoles(LiteLLMBase):
+    proxy_admin: str = "litellm_proxy_admin"
+    proxy_user: str = "litellm_user"
+
+
+class LiteLLMPromptInjectionParams(LiteLLMBase):
+    heuristics_check: bool = False
+    vector_db_check: bool = False
+    llm_api_check: bool = False
+    llm_api_name: Optional[str] = None
+    llm_api_system_prompt: Optional[str] = None
+    llm_api_fail_call_string: Optional[str] = None
+
+    @root_validator(pre=True)
+    def check_llm_api_params(cls, values):
+        llm_api_check = values.get("llm_api_check")
+        if llm_api_check is True:
+            if "llm_api_name" not in values or not values["llm_api_name"]:
+                raise ValueError(
+                    "If llm_api_check is set to True, llm_api_name must be provided"
+                )
+            if (
+                "llm_api_system_prompt" not in values
+                or not values["llm_api_system_prompt"]
+            ):
+                raise ValueError(
+                    "If llm_api_check is set to True, llm_api_system_prompt must be provided"
+                )
+            if (
+                "llm_api_fail_call_string" not in values
+                or not values["llm_api_fail_call_string"]
+            ):
+                raise ValueError(
+                    "If llm_api_check is set to True, llm_api_fail_call_string must be provided"
+                )
+        return values
 
 
 ######### Request Class Definition ######
@@ -498,6 +531,9 @@ class ConfigGeneralSettings(LiteLLMBase):
     ui_access_mode: Optional[Literal["admin_only", "all"]] = Field(
         "all", description="Control access to the Proxy UI"
     )
+    allowed_routes: Optional[List] = Field(
+        None, description="Proxy API Endpoints you want users to be able to access"
+    )
 
 
 class ConfigYAML(LiteLLMBase):
@@ -599,6 +635,8 @@ class LiteLLM_UserTable(LiteLLMBase):
     model_spend: Optional[Dict] = {}
     user_email: Optional[str]
     models: list = []
+    tpm_limit: Optional[int] = None
+    rpm_limit: Optional[int] = None
 
     @root_validator(pre=True)
     def set_model_info(cls, values):
@@ -617,6 +655,7 @@ class LiteLLM_EndUserTable(LiteLLMBase):
     blocked: bool
     alias: Optional[str] = None
     spend: float = 0.0
+    litellm_budget_table: Optional[LiteLLM_BudgetTable] = None
 
     @root_validator(pre=True)
     def set_model_info(cls, values):

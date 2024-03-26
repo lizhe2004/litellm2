@@ -107,6 +107,14 @@ from litellm.caching import DualCache
 from litellm.proxy.health_check import perform_health_check
 from litellm._logging import verbose_router_logger, verbose_proxy_logger
 from litellm.proxy.auth.handle_jwt import JWTHandler
+from litellm.proxy.hooks.prompt_injection_detection import (
+    _OPTIONAL_PromptInjectionDetection,
+)
+from litellm.proxy.auth.auth_checks import (
+    common_checks,
+    get_end_user_object,
+    allowed_routes_check,
+)
 
 try:
     from litellm._version import version
@@ -158,8 +166,11 @@ ui_link = f"/ui/"
 ui_message = (
     f"👉 [```LiteLLM Admin Panel on /ui```]({ui_link}). Create, Edit Keys with SSO"
 )
+
+_docs_url = None if os.getenv("NO_DOCS", "False") == "True" else "/"
+
 app = FastAPI(
-    docs_url="/",
+    docs_url=_docs_url,
     title="LiteLLM API",
     description=f"Proxy Server to call 100+ LLMs in the OpenAI format\n\n{ui_message}",
     version=version,
@@ -284,6 +295,7 @@ proxy_batch_write_at = 60  # in seconds
 litellm_master_key_hash = None
 disable_spend_logs = False
 jwt_handler = JWTHandler()
+prompt_injection_detection_obj: Optional[_OPTIONAL_PromptInjectionDetection] = None
 ### INITIALIZE GLOBAL LOGGING OBJECT ###
 proxy_logging_obj = ProxyLogging(user_api_key_cache=user_api_key_cache)
 ### REDIS QUEUE ###
@@ -324,7 +336,7 @@ def _get_pydantic_json_dict(pydantic_obj: BaseModel) -> dict:
 async def user_api_key_auth(
     request: Request, api_key: str = fastapi.Security(api_key_header)
 ) -> UserAPIKeyAuth:
-    global master_key, prisma_client, llm_model_list, user_custom_auth, custom_db_client
+    global master_key, prisma_client, llm_model_list, user_custom_auth, custom_db_client, general_settings
     try:
         if isinstance(api_key, str):
             passed_in_key = api_key
@@ -346,9 +358,10 @@ async def user_api_key_auth(
             enable_jwt_auth: true
         ```
         """
+        route: str = request.url.path
         if general_settings.get("enable_jwt_auth", False) == True:
             is_jwt = jwt_handler.is_jwt(token=api_key)
-            verbose_proxy_logger.debug(f"is_jwt: {is_jwt}")
+            verbose_proxy_logger.debug("is_jwt: %s", is_jwt)
             if is_jwt:
                 # check if valid token
                 valid_token = await jwt_handler.auth_jwt(token=api_key)
@@ -360,20 +373,67 @@ async def user_api_key_auth(
                 user_id = jwt_handler.get_user_id(
                     token=valid_token, default_value=litellm_proxy_admin_name
                 )
+
+                end_user_object = None
+                # get the request body
+                request_data = await _read_request_body(request=request)
+                # get user obj from cache/db -> run for admin too. Ensures, admin client id in db.
+                user_object = await jwt_handler.get_user_object(user_id=user_id)
+                if (
+                    request_data.get("user", None)
+                    and request_data["user"] != user_object.user_id
+                ):
+                    # get the end-user object
+                    end_user_object = await get_end_user_object(
+                        end_user_id=request_data["user"],
+                        prisma_client=prisma_client,
+                        user_api_key_cache=user_api_key_cache,
+                    )
+                    # save the end-user object to cache
+                    await user_api_key_cache.async_set_cache(
+                        key=request_data["user"], value=end_user_object
+                    )
+
+                # run through common checks
+                _ = common_checks(
+                    request_body=request_data,
+                    user_object=user_object,
+                    end_user_object=end_user_object,
+                )
+                # save user object in cache
+                await user_api_key_cache.async_set_cache(
+                    key=user_object.user_id, value=user_object
+                )
                 # if admin return
                 if is_admin:
-                    _user_api_key_obj = UserAPIKeyAuth(
+                    return UserAPIKeyAuth(
                         api_key=api_key,
                         user_role="proxy_admin",
                         user_id=user_id,
                     )
-                    user_api_key_cache.set_cache(
-                        key=hash_token(api_key), value=_user_api_key_obj
+                else:
+                    is_allowed = allowed_routes_check(
+                        user_role="app_owner",
+                        route=route,
+                        allowed_routes=general_settings.get("allowed_routes", None),
                     )
-
-                    return _user_api_key_obj
-            else:
-                raise Exception("Invalid key error!")
+                    if is_allowed:
+                        # return UserAPIKeyAuth object
+                        return UserAPIKeyAuth(
+                            api_key=None,
+                            user_id=user_object.user_id,
+                            tpm_limit=user_object.tpm_limit,
+                            rpm_limit=user_object.rpm_limit,
+                            models=user_object.models,
+                            user_role="app_owner",
+                        )
+                    else:
+                        raise HTTPException(
+                            status_code=401,
+                            detail={
+                                "error": f"User={user_object.user_id} not allowed to access this route={route}."
+                            },
+                        )
         #### ELSE ####
         if master_key is None:
             if isinstance(api_key, str):
@@ -381,7 +441,6 @@ async def user_api_key_auth(
             else:
                 return UserAPIKeyAuth()
 
-        route: str = request.url.path
         if route == "/user/auth":
             if general_settings.get("allow_user_auth", False) == True:
                 return UserAPIKeyAuth()
@@ -438,7 +497,7 @@ async def user_api_key_auth(
                 user_role="proxy_admin",
                 user_id=litellm_proxy_admin_name,
             )
-            user_api_key_cache.set_cache(
+            await user_api_key_cache.async_set_cache(
                 key=hash_token(master_key), value=_user_api_key_obj
             )
 
@@ -461,7 +520,7 @@ async def user_api_key_auth(
         valid_token = user_api_key_cache.get_cache(key=api_key)
         if valid_token is None:
             ## check db
-            verbose_proxy_logger.debug(f"api key: {api_key}")
+            verbose_proxy_logger.debug("api key: %s", api_key)
             if prisma_client is not None:
                 valid_token = await prisma_client.get_data(
                     token=api_key, table_name="combined_view"
@@ -476,9 +535,9 @@ async def user_api_key_auth(
                     valid_token = await custom_db_client.get_data(
                         key=original_api_key, table_name="key"
                     )
-            verbose_proxy_logger.debug(f"Token from db: {valid_token}")
+            verbose_proxy_logger.debug("Token from db: %s", valid_token)
         elif valid_token is not None:
-            verbose_proxy_logger.debug(f"API Key Cache Hit!")
+            verbose_proxy_logger.debug("API Key Cache Hit!")
         if valid_token:
             # Got Valid Token from Cache, DB
             # Run checks for
@@ -603,7 +662,7 @@ async def user_api_key_auth(
                             query_type="find_all",
                         )
                         for _id in user_id_information:
-                            user_api_key_cache.set_cache(
+                            await user_api_key_cache.async_set_cache(
                                 key=_id["user_id"], value=_id, ttl=600
                             )
                     if custom_db_client is not None:
@@ -791,7 +850,9 @@ async def user_api_key_auth(
             api_key = valid_token.token
 
             # Add hashed token to cache
-            user_api_key_cache.set_cache(key=api_key, value=valid_token, ttl=600)
+            await user_api_key_cache.async_set_cache(
+                key=api_key, value=valid_token, ttl=600
+            )
             valid_token_dict = _get_pydantic_json_dict(valid_token)
             valid_token_dict.pop("token", None)
             """
@@ -942,7 +1003,6 @@ async def user_api_key_auth(
         else:
             raise Exception()
     except Exception as e:
-        # verbose_proxy_logger.debug(f"An exception occurred - {traceback.format_exc()}")
         traceback.print_exc()
         if isinstance(e, HTTPException):
             raise ProxyException(
@@ -1030,11 +1090,11 @@ async def _PROXY_track_cost_callback(
     start_time=None,
     end_time=None,  # start/end time for completion
 ):
-    verbose_proxy_logger.debug(f"INSIDE _PROXY_track_cost_callback")
+    verbose_proxy_logger.debug("INSIDE _PROXY_track_cost_callback")
     global prisma_client, custom_db_client
     try:
         # check if it has collected an entire stream response
-        verbose_proxy_logger.debug(f"Proxy: In track_cost_callback for {kwargs}")
+        verbose_proxy_logger.debug("Proxy: In track_cost_callback for: %s", kwargs)
         verbose_proxy_logger.debug(
             f"kwargs stream: {kwargs.get('stream', None)} + complete streaming response: {kwargs.get('complete_streaming_response', None)}"
         )
@@ -1073,7 +1133,10 @@ async def _PROXY_track_cost_callback(
                 )
 
                 await update_cache(
-                    token=user_api_key, user_id=user_id, response_cost=response_cost
+                    token=user_api_key,
+                    user_id=user_id,
+                    end_user_id=end_user_id,
+                    response_cost=response_cost,
                 )
             else:
                 raise Exception("User API key missing from custom callback.")
@@ -1099,7 +1162,7 @@ async def _PROXY_track_cost_callback(
                 error_message=error_msg,
             )
         )
-        verbose_proxy_logger.debug(f"error in tracking cost callback - {error_msg}")
+        verbose_proxy_logger.debug("error in tracking cost callback - %s", e)
 
 
 async def update_database(
@@ -1250,7 +1313,7 @@ async def update_database(
                     # Calculate the new cost by adding the existing cost and response_cost
                     new_spend = existing_spend + response_cost
 
-                    verbose_proxy_logger.debug(f"new cost: {new_spend}")
+                    verbose_proxy_logger.debug("new cost: %s", new_spend)
                     # Update the cost column for the given token
                     await custom_db_client.update_data(
                         key=token, value={"spend": new_spend}, table_name="key"
@@ -1317,7 +1380,7 @@ async def update_database(
                     # Calculate the new cost by adding the existing cost and response_cost
                     new_spend = existing_spend + response_cost
 
-                    verbose_proxy_logger.debug(f"new cost: {new_spend}")
+                    verbose_proxy_logger.debug("new cost: %s", new_spend)
                     # Update the cost column for the given token
                     await custom_db_client.update_data(
                         key=token, value={"spend": new_spend}, table_name="key"
@@ -1348,9 +1411,10 @@ async def update_database(
 
 
 async def update_cache(
-    token,
-    user_id,
-    response_cost,
+    token: Optional[str],
+    user_id: Optional[str],
+    end_user_id: Optional[str],
+    response_cost: Optional[float],
 ):
     """
     Use this to update the cache with new user spend.
@@ -1365,12 +1429,17 @@ async def update_cache(
             hashed_token = hash_token(token=token)
         else:
             hashed_token = token
+        verbose_proxy_logger.debug("_update_key_cache: hashed_token=%s", hashed_token)
         existing_spend_obj = await user_api_key_cache.async_get_cache(key=hashed_token)
         verbose_proxy_logger.debug(
-            f"_update_key_db: existing spend: {existing_spend_obj}"
+            f"_update_key_cache: existing_spend_obj={existing_spend_obj}"
+        )
+        verbose_proxy_logger.debug(
+            f"_update_key_cache: existing spend: {existing_spend_obj}"
         )
         if existing_spend_obj is None:
             existing_spend = 0
+            existing_spend_obj = LiteLLM_VerificationTokenView()
         else:
             existing_spend = existing_spend_obj.spend
         # Calculate the new cost by adding the existing cost and response_cost
@@ -1426,18 +1495,7 @@ async def update_cache(
 
     async def _update_user_cache():
         ## UPDATE CACHE FOR USER ID + GLOBAL PROXY
-        end_user_id = None
-        if isinstance(token, str) and token.startswith("sk-"):
-            hashed_token = hash_token(token=token)
-        else:
-            hashed_token = token
-        existing_token_obj = await user_api_key_cache.async_get_cache(key=hashed_token)
-        if existing_token_obj is None:
-            return
-        if existing_token_obj.user_id != user_id:  # an end-user id was passed in
-            end_user_id = user_id
-        user_ids = [existing_token_obj.user_id, litellm_proxy_budget_name, end_user_id]
-
+        user_ids = [user_id, litellm_proxy_budget_name, end_user_id]
         try:
             for _id in user_ids:
                 # Fetch the existing cost for the given user
@@ -1483,8 +1541,58 @@ async def update_cache(
                 f"An error occurred updating user cache: {str(e)}\n\n{traceback.format_exc()}"
             )
 
-    asyncio.create_task(_update_key_cache())
+    async def _update_end_user_cache():
+        ## UPDATE CACHE FOR USER ID + GLOBAL PROXY
+        _id = end_user_id
+        try:
+            # Fetch the existing cost for the given user
+            existing_spend_obj = await user_api_key_cache.async_get_cache(key=_id)
+            if existing_spend_obj is None:
+                # if user does not exist in LiteLLM_UserTable, create a new user
+                existing_spend = 0
+                max_user_budget = None
+                if litellm.max_user_budget is not None:
+                    max_user_budget = litellm.max_user_budget
+                existing_spend_obj = LiteLLM_EndUserTable(
+                    user_id=_id,
+                    spend=0,
+                    blocked=False,
+                    litellm_budget_table=LiteLLM_BudgetTable(
+                        max_budget=max_user_budget
+                    ),
+                )
+            verbose_proxy_logger.debug(
+                f"_update_end_user_db: existing spend: {existing_spend_obj}; response_cost: {response_cost}"
+            )
+            if existing_spend_obj is None:
+                existing_spend = 0
+            else:
+                if isinstance(existing_spend_obj, dict):
+                    existing_spend = existing_spend_obj["spend"]
+                else:
+                    existing_spend = existing_spend_obj.spend
+            # Calculate the new cost by adding the existing cost and response_cost
+            new_spend = existing_spend + response_cost
+
+            # Update the cost column for the given user
+            if isinstance(existing_spend_obj, dict):
+                existing_spend_obj["spend"] = new_spend
+                user_api_key_cache.set_cache(key=_id, value=existing_spend_obj)
+            else:
+                existing_spend_obj.spend = new_spend
+                user_api_key_cache.set_cache(key=_id, value=existing_spend_obj.json())
+        except Exception as e:
+            verbose_proxy_logger.debug(
+                f"An error occurred updating end user cache: {str(e)}\n\n{traceback.format_exc()}"
+            )
+
+    if token is not None:
+        asyncio.create_task(_update_key_cache())
+
     asyncio.create_task(_update_user_cache())
+
+    if end_user_id is not None:
+        asyncio.create_task(_update_end_user_cache())
 
 
 def run_ollama_serve():
@@ -1657,7 +1765,7 @@ class ProxyConfig:
         """
         Load config values into proxy global state
         """
-        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode, litellm_master_key_hash, proxy_batch_write_at, disable_spend_logs
+        global master_key, user_config_file_path, otel_logging, user_custom_auth, user_custom_auth_path, user_custom_key_generate, use_background_health_checks, health_check_interval, use_queue, custom_db_client, proxy_budget_rescheduler_max_time, proxy_budget_rescheduler_min_time, ui_access_mode, litellm_master_key_hash, proxy_batch_write_at, disable_spend_logs, prompt_injection_detection_obj
 
         # Load existing config
         config = await self.get_config(config_file_path=config_file_path)
@@ -1696,13 +1804,14 @@ class ProxyConfig:
 
                     cache_type = cache_params.get("type", "redis")
 
-                    verbose_proxy_logger.debug(f"passed cache type={cache_type}")
+                    verbose_proxy_logger.debug("passed cache type=%s", cache_type)
 
                     if (
                         cache_type == "redis" or cache_type == "redis-semantic"
                     ) and len(cache_params.keys()) == 0:
                         cache_host = litellm.get_secret("REDIS_HOST", None)
                         cache_port = litellm.get_secret("REDIS_PORT", None)
+                        cache_password = None
                         cache_params.update(
                             {
                                 "type": cache_type,
@@ -1710,6 +1819,7 @@ class ProxyConfig:
                                 "port": cache_port,
                             }
                         )
+
                         if litellm.get_secret("REDIS_PASSWORD", None) is not None:
                             cache_password = litellm.get_secret("REDIS_PASSWORD", None)
                             cache_params.update(
@@ -1816,12 +1926,25 @@ class ProxyConfig:
                                 isinstance(callback, str)
                                 and callback == "detect_prompt_injection"
                             ):
-                                from enterprise.enterprise_hooks.prompt_injection_detection import (
-                                    _ENTERPRISE_PromptInjectionDetection,
+                                from litellm.proxy.hooks.prompt_injection_detection import (
+                                    _OPTIONAL_PromptInjectionDetection,
                                 )
 
+                                prompt_injection_params = None
+                                if "prompt_injection_params" in litellm_settings:
+                                    prompt_injection_params_in_config = (
+                                        litellm_settings["prompt_injection_params"]
+                                    )
+                                    prompt_injection_params = (
+                                        LiteLLMPromptInjectionParams(
+                                            **prompt_injection_params_in_config
+                                        )
+                                    )
+
                                 prompt_injection_detection_obj = (
-                                    _ENTERPRISE_PromptInjectionDetection()
+                                    _OPTIONAL_PromptInjectionDetection(
+                                        prompt_injection_params=prompt_injection_params,
+                                    )
                                 )
                                 imported_list.append(prompt_injection_detection_obj)
                             elif (
@@ -1862,7 +1985,7 @@ class ProxyConfig:
                 elif key == "success_callback":
                     litellm.success_callback = []
 
-                    # intialize success callbacks
+                    # initialize success callbacks
                     for callback in value:
                         # user passed custom_callbacks.async_on_succes_logger. They need us to import a function
                         if "." in callback:
@@ -1887,7 +2010,7 @@ class ProxyConfig:
                 elif key == "failure_callback":
                     litellm.failure_callback = []
 
-                    # intialize success callbacks
+                    # initialize success callbacks
                     for callback in value:
                         # user passed custom_callbacks.async_on_succes_logger. They need us to import a function
                         if "." in callback:
@@ -1967,9 +2090,9 @@ class ProxyConfig:
             ### CONNECT TO DATABASE ###
             database_url = general_settings.get("database_url", None)
             if database_url and database_url.startswith("os.environ/"):
-                verbose_proxy_logger.debug(f"GOING INTO LITELLM.GET_SECRET!")
+                verbose_proxy_logger.debug("GOING INTO LITELLM.GET_SECRET!")
                 database_url = litellm.get_secret(database_url)
-                verbose_proxy_logger.debug(f"RETRIEVED DB URL: {database_url}")
+                verbose_proxy_logger.debug("RETRIEVED DB URL: %s", database_url)
             ### MASTER KEY ###
             master_key = general_settings.get(
                 "master_key", litellm.get_secret("LITELLM_MASTER_KEY", None)
@@ -2015,7 +2138,7 @@ class ProxyConfig:
                             verbose_proxy_logger.info(
                                 f"DynamoDB Loading - {value} is not a valid file path"
                             )
-                verbose_proxy_logger.debug(f"database_args: {database_args}")
+                verbose_proxy_logger.debug("database_args: %s", database_args)
                 custom_db_client = DBClient(
                     custom_db_args=database_args, custom_db_type=database_type
                 )
@@ -2288,11 +2411,11 @@ async def generate_key_helper_fn(
                 return key_data
 
             ## CREATE KEY
-            verbose_proxy_logger.debug(f"prisma_client: Creating Key={key_data}")
+            verbose_proxy_logger.debug("prisma_client: Creating Key= %s", key_data)
             await prisma_client.insert_data(data=key_data, table_name="key")
         elif custom_db_client is not None:
             ## CREATE USER (If necessary)
-            verbose_proxy_logger.debug(f"CustomDBClient: Creating User={user_data}")
+            verbose_proxy_logger.debug("CustomDBClient: Creating User= %s", user_data)
             user_row = await custom_db_client.insert_data(
                 value=user_data, table_name="user"
             )
@@ -2306,7 +2429,7 @@ async def generate_key_helper_fn(
             if len(user_row.models) > 0 and len(key_data["models"]) == 0:  # type: ignore
                 key_data["models"] = user_row.models
             ## CREATE KEY
-            verbose_proxy_logger.debug(f"CustomDBClient: Creating Key={key_data}")
+            verbose_proxy_logger.debug("CustomDBClient: Creating Key= %s", key_data)
             await custom_db_client.insert_data(value=key_data, table_name="key")
     except Exception as e:
         traceback.print_exc()
@@ -2458,7 +2581,7 @@ async def initialize(
 def data_generator(response):
     verbose_proxy_logger.debug("inside generator")
     for chunk in response:
-        verbose_proxy_logger.debug(f"returned chunk: {chunk}")
+        verbose_proxy_logger.debug("returned chunk: %s", chunk)
         try:
             yield f"data: {json.dumps(chunk.dict())}\n\n"
         except:
@@ -2545,7 +2668,7 @@ def parse_cache_control(cache_control):
 
 def on_backoff(details):
     # The 'tries' key in the details dictionary contains the number of completed tries
-    verbose_proxy_logger.debug(f"Backing off... this was attempt #{details['tries']}")
+    verbose_proxy_logger.debug("Backing off... this was attempt # %s", details["tries"])
 
 
 @router.on_event("startup")
@@ -2562,7 +2685,7 @@ async def startup_event():
 
     ### LOAD CONFIG ###
     worker_config = litellm.get_secret("WORKER_CONFIG")
-    verbose_proxy_logger.debug(f"worker_config: {worker_config}")
+    verbose_proxy_logger.debug("worker_config: %s", worker_config)
     # check if it's a valid file path
     if os.path.isfile(worker_config):
         if proxy_config.is_yaml(config_file_path=worker_config):
@@ -2585,18 +2708,30 @@ async def startup_event():
 
     proxy_logging_obj._init_litellm_callbacks()  # INITIALIZE LITELLM CALLBACKS ON SERVER STARTUP <- do this to catch any logging errors on startup, not when calls are being made
 
+    ## JWT AUTH ##
+    jwt_handler.update_environment(
+        prisma_client=prisma_client,
+        user_api_key_cache=user_api_key_cache,
+        litellm_proxy_roles=LiteLLMProxyRoles(
+            **general_settings.get("litellm_proxy_roles", {})
+        ),
+    )
+
     if use_background_health_checks:
         asyncio.create_task(
             _run_background_health_check()
         )  # start the background health check coroutine.
 
-    verbose_proxy_logger.debug(f"prisma client - {prisma_client}")
+    if prompt_injection_detection_obj is not None:
+        prompt_injection_detection_obj.update_environment(router=llm_router)
+
+    verbose_proxy_logger.debug("prisma_client: %s", prisma_client)
     if prisma_client is not None:
         await prisma_client.connect()
 
-    verbose_proxy_logger.debug(f"custom_db_client client - {custom_db_client}")
+    verbose_proxy_logger.debug("custom_db_client client - %s", custom_db_client)
     if custom_db_client is not None:
-        verbose_proxy_logger.debug(f"custom_db_client connecting - {custom_db_client}")
+        verbose_proxy_logger.debug("custom_db_client: connecting %s", custom_db_client)
         await custom_db_client.connect()
 
     if prisma_client is not None and master_key is not None:
@@ -2658,7 +2793,7 @@ async def startup_event():
     if prisma_client is not None:
         create_view_response = await prisma_client.check_view_exists()
 
-    ### START BUDGET SCHEDULER ###
+    ### START BATCH WRITING DB ###
     if prisma_client is not None:
         scheduler = AsyncIOScheduler()
         interval = random.randint(
@@ -2667,9 +2802,14 @@ async def startup_event():
         batch_writing_interval = random.randint(
             proxy_batch_write_at - 3, proxy_batch_write_at + 3
         )  # random interval, so multiple workers avoid batch writing at the same time
-        scheduler.add_job(
-            reset_budget, "interval", seconds=interval, args=[prisma_client]
-        )
+
+        ### RESET BUDGET ###
+        if general_settings.get("disable_reset_budget", False) == False:
+            scheduler.add_job(
+                reset_budget, "interval", seconds=interval, args=[prisma_client]
+            )
+
+        ### UPDATE SPEND ###
         scheduler.add_job(
             update_spend,
             "interval",
@@ -2703,7 +2843,7 @@ def model_list(
             )
         if user_model is not None:
             all_models += [user_model]
-    verbose_proxy_logger.debug(f"all_models: {all_models}")
+    verbose_proxy_logger.debug("all_models: %s", all_models)
     return dict(
         data=[
             {
@@ -2833,7 +2973,7 @@ async def completion(
         else:
             model_id = ""
 
-        verbose_proxy_logger.debug(f"final response: {response}")
+        verbose_proxy_logger.debug("final response: %s", response)
         if (
             "stream" in data and data["stream"] == True
         ):  # use generate_responses to stream responses
@@ -2851,9 +2991,10 @@ async def completion(
         fastapi_response.headers["x-litellm-model-id"] = model_id
         return response
     except Exception as e:
-        verbose_proxy_logger.debug(f"EXCEPTION RAISED IN PROXY MAIN.PY")
+        verbose_proxy_logger.debug("EXCEPTION RAISED IN PROXY MAIN.PY")
         verbose_proxy_logger.debug(
-            f"\033[1;31mAn error occurred: {e}\n\n Debug this by setting `--debug`, e.g. `litellm --model gpt-3.5-turbo --debug`"
+            "\033[1;31mAn error occurred: %s\n\n Debug this by setting `--debug`, e.g. `litellm --model gpt-3.5-turbo --debug`",
+            e,
         )
         traceback.print_exc()
         error_traceback = traceback.format_exc()
@@ -2926,13 +3067,13 @@ async def chat_completion(
 
         ## Cache Controls
         headers = request.headers
-        verbose_proxy_logger.debug(f"Request Headers: {headers}")
+        verbose_proxy_logger.debug("Request Headers: %s", headers)
         cache_control_header = headers.get("Cache-Control", None)
         if cache_control_header:
             cache_dict = parse_cache_control(cache_control_header)
             data["ttl"] = cache_dict.get("s-maxage")
 
-        verbose_proxy_logger.debug(f"receiving data: {data}")
+        verbose_proxy_logger.debug("receiving data: %s", data)
         data["model"] = (
             general_settings.get("completion_model", None)  # server default
             or user_model  # model name passed via cli args
@@ -3004,7 +3145,9 @@ async def chat_completion(
         )
 
         tasks = []
-        tasks.append(proxy_logging_obj.during_call_hook(data=data))
+        tasks.append(
+            proxy_logging_obj.during_call_hook(data=data, call_type="completion")
+        )
 
         start_time = time.time()
 
@@ -3091,18 +3234,6 @@ async def chat_completion(
             if llm_model_list is not None
             else []
         )
-        if llm_router is not None and data.get("model", "") in router_model_names:
-            verbose_proxy_logger.debug("Results from router")
-            verbose_proxy_logger.debug("\nRouter stats")
-            verbose_proxy_logger.debug("\nTotal Calls made")
-            for key, value in llm_router.total_calls.items():
-                verbose_proxy_logger.debug(f"{key}: {value}")
-            verbose_proxy_logger.debug("\nSuccess Calls made")
-            for key, value in llm_router.success_calls.items():
-                verbose_proxy_logger.debug(f"{key}: {value}")
-            verbose_proxy_logger.debug("\nFail Calls made")
-            for key, value in llm_router.fail_calls.items():
-                verbose_proxy_logger.debug(f"{key}: {value}")
         if user_debug:
             traceback.print_exc()
 
@@ -5132,10 +5263,10 @@ async def user_update(data: UpdateUserRequest):
                 non_default_values[k] = v
 
         ## ADD USER, IF NEW ##
-        verbose_proxy_logger.debug(f"/user/update: Received data = {data}")
+        verbose_proxy_logger.debug("/user/update: Received data = %s", data)
         if data.user_id is not None and len(data.user_id) > 0:
             non_default_values["user_id"] = data.user_id  # type: ignore
-            verbose_proxy_logger.debug(f"In update user, user_id condition block.")
+            verbose_proxy_logger.debug("In update user, user_id condition block.")
             response = await prisma_client.update_data(
                 user_id=data.user_id,
                 data=non_default_values,
@@ -6223,9 +6354,9 @@ async def add_new_model(model_params: ModelParams):
         # Load existing config
         config = await proxy_config.get_config()
 
-        verbose_proxy_logger.debug(f"User config path: {user_config_file_path}")
+        verbose_proxy_logger.debug("User config path: %s", user_config_file_path)
 
-        verbose_proxy_logger.debug(f"Loaded config: {config}")
+        verbose_proxy_logger.debug("Loaded config: %s", config)
         # Add the new model to the config
         model_info = model_params.model_info.json()
         model_info = {k: v for k, v in model_info.items() if v is not None}
@@ -6237,7 +6368,7 @@ async def add_new_model(model_params: ModelParams):
             }
         )
 
-        verbose_proxy_logger.debug(f"updated model list: {config['model_list']}")
+        verbose_proxy_logger.debug("updated model list: %s", config["model_list"])
 
         # Save new config
         await proxy_config.save_config(new_config=config)
@@ -6271,6 +6402,9 @@ async def add_new_model(model_params: ModelParams):
 async def model_info_v2(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
 ):
+    """
+    BETA ENDPOINT. Might change unexpectedly. Use `/v1/model/info` for now.
+    """
     global llm_model_list, general_settings, user_config_file_path, proxy_config
 
     # Load existing config
@@ -6334,7 +6468,7 @@ async def model_info_v2(
         # don't return the api key
         model["litellm_params"].pop("api_key", None)
 
-    verbose_proxy_logger.debug(f"all_models: {all_models}")
+    verbose_proxy_logger.debug("all_models: %s", all_models)
     return {"data": all_models}
 
 
@@ -6412,7 +6546,7 @@ async def model_info_v1(
 
     if len(user_api_key_dict.models) > 0:
         model_names = user_api_key_dict.models
-        all_models = [m for m in config["model_list"] if m in model_names]
+        all_models = [m for m in config["model_list"] if m["model_name"] in model_names]
     else:
         all_models = config["model_list"]
     for model in all_models:
@@ -6451,7 +6585,7 @@ async def model_info_v1(
         # don't return the api key
         model["litellm_params"].pop("api_key", None)
 
-    verbose_proxy_logger.debug(f"all_models: {all_models}")
+    verbose_proxy_logger.debug("all_models: %s", all_models)
     return {"data": all_models}
 
 
@@ -6527,7 +6661,7 @@ async def _litellm_chat_completions_worker(data, user_api_key_dict):
                 user_api_key_dict=user_api_key_dict, data=data, call_type="completion"
             )
 
-            verbose_proxy_logger.debug(f"_litellm_chat_completions_worker started")
+            verbose_proxy_logger.debug("_litellm_chat_completions_worker started")
             ### ROUTE THE REQUEST ###
             router_model_names = (
                 [m["model_name"] for m in llm_model_list]
@@ -6553,7 +6687,7 @@ async def _litellm_chat_completions_worker(data, user_api_key_dict):
             else:  # router is not set
                 response = await litellm.acompletion(**data)
 
-            verbose_proxy_logger.debug(f"final response: {response}")
+            verbose_proxy_logger.debug("final response: {response}")
             return response
         except HTTPException as e:
             verbose_proxy_logger.debug(
@@ -6563,7 +6697,7 @@ async def _litellm_chat_completions_worker(data, user_api_key_dict):
                 e.status_code == 429
                 and "Max parallel request limit reached" in e.detail
             ):
-                verbose_proxy_logger.debug(f"Max parallel request limit reached!")
+                verbose_proxy_logger.debug("Max parallel request limit reached!")
                 timeout = litellm._calculate_retry_after(
                     remaining_retries=3, max_retries=3, min_timeout=1
                 )
@@ -6603,7 +6737,7 @@ async def async_queue_request(
             "body": copy.copy(data),  # use copy instead of deepcopy
         }
 
-        verbose_proxy_logger.debug(f"receiving data: {data}")
+        verbose_proxy_logger.debug("receiving data: %s", data)
         data["model"] = (
             general_settings.get("completion_model", None)  # server default
             or user_model  # model name passed via cli args
@@ -6930,7 +7064,7 @@ def get_image():
     default_logo = os.path.join(current_dir, "logo.jpg")
 
     logo_path = os.getenv("UI_LOGO_PATH", default_logo)
-    verbose_proxy_logger.debug(f"Reading logo from {logo_path}")
+    verbose_proxy_logger.debug("Reading logo from path: %s", logo_path)
 
     # Check if the logo path is an HTTP/HTTPS URL
     if logo_path.startswith(("http://", "https://")):
@@ -7108,11 +7242,11 @@ async def auth_callback(request: Request):
             allow_insecure_http=True,
             scope=generic_scope,
         )
-        verbose_proxy_logger.debug(f"calling generic_sso.verify_and_process")
+        verbose_proxy_logger.debug("calling generic_sso.verify_and_process")
         result = await generic_sso.verify_and_process(
             request, params={"include_client_id": generic_include_client_id}
         )
-        verbose_proxy_logger.debug(f"generic result: {result}")
+        verbose_proxy_logger.debug("generic result: %s", result)
 
     # User is Authe'd in - generate key for the UI to access Proxy
     user_email = getattr(result, "email", None)
@@ -7239,7 +7373,7 @@ async def update_config(config_info: ConfigYAML):
         config = await proxy_config.get_config()
 
         backup_config = copy.deepcopy(config)
-        verbose_proxy_logger.debug(f"Loaded config: {config}")
+        verbose_proxy_logger.debug("Loaded config: %s", config)
 
         # update the general settings
         if config_info.general_settings is not None:
@@ -7554,6 +7688,71 @@ async def health_liveliness():
     return "I'm alive!"
 
 
+@router.get(
+    "/cache/ping",
+    tags=["caching"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def cache_ping():
+    """
+    Endpoint for checking if cache can be pinged
+    """
+    try:
+        litellm_cache_params = {}
+        specific_cache_params = {}
+
+        if litellm.cache is None:
+            raise HTTPException(
+                status_code=503, detail="Cache not initialized. litellm.cache is None"
+            )
+
+        for k, v in vars(litellm.cache).items():
+            try:
+                if k == "cache":
+                    continue
+                litellm_cache_params[k] = str(copy.deepcopy(v))
+            except Exception:
+                litellm_cache_params[k] = "<unable to copy or convert>"
+        for k, v in vars(litellm.cache.cache).items():
+            try:
+                specific_cache_params[k] = str(v)
+            except Exception:
+                specific_cache_params[k] = "<unable to copy or convert>"
+        if litellm.cache.type == "redis":
+            # ping the redis cache
+            ping_response = await litellm.cache.ping()
+            verbose_proxy_logger.debug(
+                "/cache/ping: ping_response: " + str(ping_response)
+            )
+            # making a set cache call
+            # add cache does not return anything
+            await litellm.cache.async_add_cache(
+                result="test_key",
+                model="test-model",
+                messages=[{"role": "user", "content": "test from litellm"}],
+            )
+            verbose_proxy_logger.debug("/cache/ping: done with set_cache()")
+            return {
+                "status": "healthy",
+                "cache_type": litellm.cache.type,
+                "ping_response": True,
+                "set_cache_response": "success",
+                "litellm_cache_params": litellm_cache_params,
+                "redis_cache_params": specific_cache_params,
+            }
+        else:
+            return {
+                "status": "healthy",
+                "cache_type": litellm.cache.type,
+                "litellm_cache_params": litellm_cache_params,
+            }
+    except Exception as e:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Service Unhealthy ({str(e)}).Cache parameters: {litellm_cache_params}.specific_cache_params: {specific_cache_params}",
+        )
+
+
 @router.get("/", dependencies=[Depends(user_api_key_auth)])
 async def home(request: Request):
     return "LiteLLM: RUNNING"
@@ -7677,6 +7876,8 @@ async def shutdown_event():
 
     if litellm.cache is not None:
         await litellm.cache.disconnect()
+
+    await jwt_handler.close()
 
     ## RESET CUSTOM VARIABLES ##
     cleanup_router_config_variables()

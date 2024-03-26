@@ -138,7 +138,17 @@ class ProxyLogging:
         except Exception as e:
             raise e
 
-    async def during_call_hook(self, data: dict):
+    async def during_call_hook(
+        self,
+        data: dict,
+        call_type: Literal[
+            "completion",
+            "embeddings",
+            "image_generation",
+            "moderation",
+            "audio_transcription",
+        ],
+    ):
         """
         Runs the CustomLogger's async_moderation_hook()
         """
@@ -146,7 +156,9 @@ class ProxyLogging:
             new_data = copy.deepcopy(data)
             try:
                 if isinstance(callback, CustomLogger):
-                    await callback.async_moderation_hook(data=new_data)
+                    await callback.async_moderation_hook(
+                        data=new_data, call_type=call_type
+                    )
             except Exception as e:
                 raise e
         return data
@@ -294,7 +306,7 @@ class ProxyLogging:
 
         # check if crossed budget
         if user_current_spend >= user_max_budget:
-            verbose_proxy_logger.debug(f"Budget Crossed for {user_info}")
+            verbose_proxy_logger.debug("Budget Crossed for %s", user_info)
             message = "Budget Crossed for" + user_info
             await self.alerting_handler(
                 message=message,
@@ -1049,7 +1061,7 @@ class PrismaClient:
         Add a key to the database. If it already exists, do nothing.
         """
         try:
-            verbose_proxy_logger.debug(f"PrismaClient: insert_data: {data}")
+            verbose_proxy_logger.debug("PrismaClient: insert_data: %s", data)
             if table_name == "key":
                 token = data["token"]
                 hashed_token = self.hash_token(token=token)
@@ -1067,7 +1079,7 @@ class PrismaClient:
                         "update": {},  # don't do anything if it already exists
                     },
                 )
-                verbose_proxy_logger.info(f"Data Inserted into Keys Table")
+                verbose_proxy_logger.info("Data Inserted into Keys Table")
                 return new_verification_token
             elif table_name == "user":
                 db_data = self.jsonify_object(data=data)
@@ -1078,7 +1090,7 @@ class PrismaClient:
                         "update": {},  # don't do anything if it already exists
                     },
                 )
-                verbose_proxy_logger.info(f"Data Inserted into User Table")
+                verbose_proxy_logger.info("Data Inserted into User Table")
                 return new_user_row
             elif table_name == "team":
                 db_data = self.jsonify_object(data=data)
@@ -1095,7 +1107,7 @@ class PrismaClient:
                         "update": {},  # don't do anything if it already exists
                     },
                 )
-                verbose_proxy_logger.info(f"Data Inserted into Team Table")
+                verbose_proxy_logger.info("Data Inserted into Team Table")
                 return new_team_row
             elif table_name == "config":
                 """
@@ -1120,7 +1132,7 @@ class PrismaClient:
 
                     tasks.append(updated_table_row)
                 await asyncio.gather(*tasks)
-                verbose_proxy_logger.info(f"Data Inserted into Config Table")
+                verbose_proxy_logger.info("Data Inserted into Config Table")
             elif table_name == "spend":
                 db_data = self.jsonify_object(data=data)
                 new_spend_row = await self.db.litellm_spendlogs.upsert(
@@ -1130,7 +1142,7 @@ class PrismaClient:
                         "update": {},  # don't do anything if it already exists
                     },
                 )
-                verbose_proxy_logger.info(f"Data Inserted into Spend Table")
+                verbose_proxy_logger.info("Data Inserted into Spend Table")
                 return new_spend_row
             elif table_name == "user_notification":
                 db_data = self.jsonify_object(data=data)
@@ -1143,7 +1155,7 @@ class PrismaClient:
                         },
                     )
                 )
-                verbose_proxy_logger.info(f"Data Inserted into Model Request Table")
+                verbose_proxy_logger.info("Data Inserted into Model Request Table")
                 return new_user_notification_row
 
         except Exception as e:
@@ -1393,7 +1405,7 @@ class PrismaClient:
                 deleted_tokens = await self.db.litellm_verificationtoken.delete_many(
                     where=filter_query  # type: ignore
                 )
-                verbose_proxy_logger.debug(f"deleted_tokens: {deleted_tokens}")
+                verbose_proxy_logger.debug("deleted_tokens: %s", deleted_tokens)
                 return {"deleted_keys": deleted_tokens}
             elif (
                 table_name == "team"
@@ -1756,7 +1768,7 @@ def get_logging_payload(kwargs, response_obj, start_time, end_time):
         "api_base": litellm_params.get("api_base", ""),
     }
 
-    verbose_proxy_logger.debug(f"SpendTable: created payload - payload: {payload}\n\n")
+    verbose_proxy_logger.debug("SpendTable: created payload - payload: %s\n\n", payload)
     json_fields = [
         field
         for field, field_type in LiteLLM_SpendLogs.__annotations__.items()
