@@ -639,9 +639,10 @@ async def user_api_key_auth(
                 pass
             elif (
                 isinstance(valid_token.models, list)
-                and "all-proxy-models" in valid_token.models
+                and "all-team-models" in valid_token.models
             ):
-                # Admin UI - Special alias to allow `all_models`
+                # Do not do any validation at this step
+                # the validation will occur when checking the team has access to this model
                 pass
             else:
                 try:
@@ -2562,7 +2563,10 @@ async def generate_key_helper_fn(
 
             ## CREATE KEY
             verbose_proxy_logger.debug("prisma_client: Creating Key= %s", key_data)
-            await prisma_client.insert_data(data=key_data, table_name="key")
+            create_key_response = await prisma_client.insert_data(
+                data=key_data, table_name="key"
+            )
+            key_data["token_id"] = getattr(create_key_response, "token", None)
         elif custom_db_client is not None:
             if table_name is None or table_name == "user":
                 ## CREATE USER (If necessary)

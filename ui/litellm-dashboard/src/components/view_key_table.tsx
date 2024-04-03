@@ -152,18 +152,27 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
                     All Team Models
                   </Option>                
                   {selectedTeam && selectedTeam.models ? (
-                    selectedTeam.models.map((model: string) => (
-                      <Option key={model} value={model}>
-                        {model}
-                      </Option>
-                    ))
-                  ) : (
-                    userModels.map((model: string) => (
-                      <Option key={model} value={model}>
-                        {model}
-                      </Option>
-                    ))
-                  )}
+  selectedTeam.models.includes("all-proxy-models") ? (
+    userModels.filter(model => model !== "all-proxy-models").map((model: string) => (
+      <Option key={model} value={model}>
+        {model}
+      </Option>
+    ))
+  ) : (
+    selectedTeam.models.map((model: string) => (
+      <Option key={model} value={model}>
+        {model}
+      </Option>
+    ))
+  )
+) : (
+  userModels.map((model: string) => (
+    <Option key={model} value={model}>
+      {model}
+    </Option>
+  ))
+)}
+
 
 
                 </Select>
@@ -204,6 +213,11 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
   
   const handleEditClick = (token: any) => {
     console.log("handleEditClick:", token);
+
+    // set token.token to token.token_id if token_id is not null
+    if (token.token_id !== null) {
+      token.token = token.token_id;
+    }
     setSelectedToken(token);
     setEditModalVisible(true);
   };
