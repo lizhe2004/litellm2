@@ -12,9 +12,9 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
-
 import httpx
 import litellm
+
 from ._logging import verbose_logger
 from litellm import (  # type: ignore
     client,
@@ -180,7 +180,7 @@ async def acompletion(
     n: Optional[int] = None,
     stream: Optional[bool] = None,
     stop=None,
-    max_tokens: Optional[float] = None,
+    max_tokens: Optional[int] = None,
     presence_penalty: Optional[float] = None,
     frequency_penalty: Optional[float] = None,
     logit_bias: Optional[dict] = None,
@@ -423,7 +423,7 @@ def completion(
     n: Optional[int] = None,
     stream: Optional[bool] = None,
     stop=None,
-    max_tokens: Optional[float] = None,
+    max_tokens: Optional[int] = None,
     presence_penalty: Optional[float] = None,
     frequency_penalty: Optional[float] = None,
     logit_bias: Optional[dict] = None,
@@ -520,6 +520,9 @@ def completion(
     eos_token = kwargs.get("eos_token", None)
     preset_cache_key = kwargs.get("preset_cache_key", None)
     hf_model_name = kwargs.get("hf_model_name", None)
+    ### TEXT COMPLETION CALLS ###
+    text_completion = kwargs.get("text_completion", False)
+    atext_completion = kwargs.get("atext_completion", False)
     ### ASYNC CALLS ###
     acompletion = kwargs.get("acompletion", False)
     client = kwargs.get("client", None)
@@ -561,6 +564,8 @@ def completion(
     litellm_params = [
         "metadata",
         "acompletion",
+        "atext_completion",
+        "text_completion",
         "caching",
         "mock_response",
         "api_key",
@@ -671,7 +676,7 @@ def completion(
         elif (
             input_cost_per_second is not None
         ):  # time based pricing just needs cost in place
-            output_cost_per_second = output_cost_per_second or 0.0
+            output_cost_per_second = output_cost_per_second
             litellm.register_model(
                 {
                     f"{custom_llm_provider}/{model}": {
@@ -1043,8 +1048,9 @@ def completion(
                 prompt = messages[0]["content"]
             else:
                 prompt = " ".join([message["content"] for message in messages])  # type: ignore
+
             ## COMPLETION CALL
-            model_response = openai_text_completions.completion(
+            _response = openai_text_completions.completion(
                 model=model,
                 messages=messages,
                 model_response=model_response,
@@ -1059,15 +1065,25 @@ def completion(
                 timeout=timeout,
             )
 
+            if (
+                optional_params.get("stream", False) == False
+                and acompletion == False
+                and text_completion == False
+            ):
+                # convert to chat completion response
+                _response = litellm.OpenAITextCompletionConfig().convert_to_chat_model_response_object(
+                    response_object=_response, model_response_object=model_response
+                )
+
             if optional_params.get("stream", False) or acompletion == True:
                 ## LOGGING
                 logging.post_call(
                     input=messages,
                     api_key=api_key,
-                    original_response=model_response,
+                    original_response=_response,
                     additional_args={"headers": headers},
                 )
-            response = model_response
+            response = _response
         elif (
             "replicate" in model
             or custom_llm_provider == "replicate"
@@ -2790,28 +2806,25 @@ def embedding(
                 model_response=EmbeddingResponse(),
             )
         elif custom_llm_provider == "ollama":
-            ollama_input = None
-            if isinstance(input, list) and len(input) > 1:
-                raise litellm.BadRequestError(
-                    message=f"Ollama Embeddings don't support batch embeddings",
-                    model=model,  # type: ignore
-                    llm_provider="ollama",  # type: ignore
-                )
-            if isinstance(input, list) and len(input) == 1:
-                ollama_input = "".join(input[0])
-            elif isinstance(input, str):
-                ollama_input = input
-            else:
+            api_base = (
+                litellm.api_base
+                or api_base
+                or get_secret("OLLAMA_API_BASE")
+                or "http://localhost:11434"
+            )
+            if isinstance(input, str):
+                input = [input]
+            if not all(isinstance(item, str) for item in input):
                 raise litellm.BadRequestError(
                     message=f"Invalid input for ollama embeddings. input={input}",
                     model=model,  # type: ignore
                     llm_provider="ollama",  # type: ignore
                 )
-
-            if aembedding == True:
+            if aembedding:
                 response = ollama.ollama_aembeddings(
+                    api_base=api_base,
                     model=model,
-                    prompt=ollama_input,
+                    prompts=input,
                     encoding=encoding,
                     logging_obj=logging,
                     optional_params=optional_params,
@@ -2956,7 +2969,31 @@ async def atext_completion(*args, **kwargs):
                 model=model,
             )
         else:
-            return response
+            transformed_logprobs = None
+            # only supported for TGI models
+            try:
+                raw_response = response._hidden_params.get("original_response", None)
+                transformed_logprobs = litellm.utils.transform_logprobs(raw_response)
+            except Exception as e:
+                print_verbose(f"LiteLLM non blocking exception: {e}")
+
+            ## TRANSLATE CHAT TO TEXT FORMAT ##
+            if isinstance(response, TextCompletionResponse):
+                return response
+
+            text_completion_response = TextCompletionResponse()
+            text_completion_response["id"] = response.get("id", None)
+            text_completion_response["object"] = "text_completion"
+            text_completion_response["created"] = response.get("created", None)
+            text_completion_response["model"] = response.get("model", None)
+            text_choices = TextChoices()
+            text_choices["text"] = response["choices"][0]["message"]["content"]
+            text_choices["index"] = response["choices"][0]["index"]
+            text_choices["logprobs"] = transformed_logprobs
+            text_choices["finish_reason"] = response["choices"][0]["finish_reason"]
+            text_completion_response["choices"] = [text_choices]
+            text_completion_response["usage"] = response.get("usage", None)
+            return text_completion_response
     except Exception as e:
         custom_llm_provider = custom_llm_provider or "openai"
         raise exception_type(
@@ -3140,7 +3177,7 @@ def text_completion(
                         concurrent.futures.as_completed(futures)
                     ):
                         responses[i] = future.result()
-                    text_completion_response.choices = responses
+                    text_completion_response.choices = responses  # type: ignore
 
                 return text_completion_response
     # else:
@@ -3148,8 +3185,36 @@ def text_completion(
     # these are the params supported by Completion() but not ChatCompletion
 
     # default case, non OpenAI requests go through here
-    messages = [{"role": "system", "content": prompt}]
+    # handle prompt formatting if prompt is a string vs. list of strings
+    messages = []
+    if isinstance(prompt, list) and len(prompt) > 0 and isinstance(prompt[0], str):
+        for p in prompt:
+            message = {"role": "user", "content": p}
+            messages.append(message)
+    elif isinstance(prompt, str):
+        messages = [{"role": "user", "content": prompt}]
+    elif (
+        (
+            custom_llm_provider == "openai"
+            or custom_llm_provider == "azure"
+            or custom_llm_provider == "azure_text"
+            or custom_llm_provider == "text-completion-openai"
+        )
+        and isinstance(prompt, list)
+        and len(prompt) > 0
+        and isinstance(prompt[0], list)
+    ):
+        verbose_logger.warning(
+            msg="List of lists being passed. If this is for tokens, then it might not work across all models."
+        )
+        messages = [{"role": "user", "content": prompt}]  # type: ignore
+    else:
+        raise Exception(
+            f"Unmapped prompt format. Your prompt is neither a list of strings nor a string. prompt={prompt}. File an issue - https://github.com/BerriAI/litellm/issues"
+        )
+
     kwargs.pop("prompt", None)
+    kwargs["text_completion"] = True
     response = completion(
         model=model,
         messages=messages,
@@ -3169,6 +3234,10 @@ def text_completion(
         transformed_logprobs = litellm.utils.transform_logprobs(raw_response)
     except Exception as e:
         print_verbose(f"LiteLLM non blocking exception: {e}")
+
+    if isinstance(response, TextCompletionResponse):
+        return response
+
     text_completion_response["id"] = response.get("id", None)
     text_completion_response["object"] = "text_completion"
     text_completion_response["created"] = response.get("created", None)
@@ -3180,6 +3249,7 @@ def text_completion(
     text_choices["finish_reason"] = response["choices"][0]["finish_reason"]
     text_completion_response["choices"] = [text_choices]
     text_completion_response["usage"] = response.get("usage", None)
+
     return text_completion_response
 
 
@@ -3536,6 +3606,7 @@ def transcription(
     api_key: Optional[str] = None,
     api_base: Optional[str] = None,
     api_version: Optional[str] = None,
+    max_retries: Optional[int] = None,
     litellm_logging_obj=None,
     custom_llm_provider=None,
     **kwargs,
@@ -3551,6 +3622,8 @@ def transcription(
     proxy_server_request = kwargs.get("proxy_server_request", None)
     model_info = kwargs.get("model_info", None)
     metadata = kwargs.get("metadata", {})
+    if max_retries is None:
+        max_retries = openai.DEFAULT_MAX_RETRIES
 
     model_response = litellm.utils.TranscriptionResponse()
 
@@ -3594,6 +3667,7 @@ def transcription(
             api_key=api_key,
             api_version=api_version,
             azure_ad_token=azure_ad_token,
+            max_retries=max_retries,
         )
     elif custom_llm_provider == "openai":
         response = openai_chat_completions.audio_transcriptions(
@@ -3604,6 +3678,7 @@ def transcription(
             atranscription=atranscription,
             timeout=timeout,
             logging_obj=litellm_logging_obj,
+            max_retries=max_retries,
         )
     return response
 

@@ -79,11 +79,13 @@ class AmazonTitanConfig:
 
 class AmazonAnthropicClaude3Config:
     """
-    Reference: https://us-west-2.console.aws.amazon.com/bedrock/home?region=us-west-2#/providers?model=claude
+    Reference:
+        https://us-west-2.console.aws.amazon.com/bedrock/home?region=us-west-2#/providers?model=claude
+        https://docs.anthropic.com/claude/docs/models-overview#model-comparison
 
     Supported Params for the Amazon / Anthropic Claude 3 models:
 
-    - `max_tokens` Required (integer) max tokens,
+    - `max_tokens` Required (integer) max tokens. Default is 4096
     - `anthropic_version` Required (string) version of anthropic for bedrock - e.g. "bedrock-2023-05-31"
     - `system` Optional (string) the system prompt, conversion from openai format to this is handled in factory.py
     - `temperature` Optional (float) The amount of randomness injected into the response
@@ -92,7 +94,7 @@ class AmazonAnthropicClaude3Config:
     - `stop_sequences` Optional (List[str]) Custom text sequences that cause the model to stop generating
     """
 
-    max_tokens: Optional[int] = litellm.max_tokens
+    max_tokens: Optional[int] = 4096  # Opus, Sonnet, and Haiku default
     anthropic_version: Optional[str] = "bedrock-2023-05-31"
     system: Optional[str] = None
     temperature: Optional[float] = None
@@ -689,6 +691,7 @@ def completion(
 ):
     exception_mapping_worked = False
     _is_function_call = False
+    json_schemas: dict = {}
     try:
         # pop aws_secret_access_key, aws_access_key_id, aws_region_name from kwargs, since completion calls fail with them
         aws_secret_access_key = optional_params.pop("aws_secret_access_key", None)
@@ -755,6 +758,10 @@ def completion(
                 ## Handle Tool Calling
                 if "tools" in inference_params:
                     _is_function_call = True
+                    for tool in inference_params["tools"]:
+                        json_schemas[tool["function"]["name"]] = tool["function"].get(
+                            "parameters", None
+                        )
                     tool_calling_system_prompt = construct_tool_use_system_prompt(
                         tools=inference_params["tools"]
                     )
@@ -941,7 +948,12 @@ def completion(
                     function_arguments_str = (
                         f"<invoke>{function_arguments_str}</invoke>"
                     )
-                    function_arguments = parse_xml_params(function_arguments_str)
+                    function_arguments = parse_xml_params(
+                        function_arguments_str,
+                        json_schema=json_schemas.get(
+                            function_name, None
+                        ),  # check if we have a json schema for this function name)
+                    )
                     _message = litellm.Message(
                         tool_calls=[
                             {
@@ -956,6 +968,9 @@ def completion(
                         content=None,
                     )
                     model_response.choices[0].message = _message  # type: ignore
+                    model_response._hidden_params["original_response"] = (
+                        outputText  # allow user to access raw anthropic tool calling response
+                    )
                 if _is_function_call == True and stream is not None and stream == True:
                     print_verbose(
                         f"INSIDE BEDROCK STREAMING TOOL CALLING CONDITION BLOCK"
@@ -993,7 +1008,7 @@ def completion(
                         )
                         streaming_choice.delta = delta_obj
                         streaming_model_response.choices = [streaming_choice]
-                        completion_stream = model_response_iterator(
+                        completion_stream = ModelResponseIterator(
                             model_response=streaming_model_response
                         )
                         print_verbose(
@@ -1093,10 +1108,30 @@ def completion(
 
             raise BedrockError(status_code=500, message=traceback.format_exc())
 
+class ModelResponseIterator:
+    def __init__(self, model_response):
+        self.model_response = model_response
+        self.is_done = False
 
-async def model_response_iterator(model_response):
-    yield model_response
+    # Sync iterator
+    def __iter__(self):
+        return self
 
+    def __next__(self):
+        if self.is_done:
+            raise StopIteration
+        self.is_done = True
+        return self.model_response
+
+    # Async iterator
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.is_done:
+            raise StopAsyncIteration
+        self.is_done = True
+        return self.model_response
 
 def _embedding_func_single(
     model: str,

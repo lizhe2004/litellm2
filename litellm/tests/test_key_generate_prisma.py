@@ -49,8 +49,9 @@ from litellm.proxy.proxy_server import (
     spend_key_fn,
     view_spend_logs,
     user_info,
+    info_key_fn,
 )
-from litellm.proxy.utils import PrismaClient, ProxyLogging, hash_token
+from litellm.proxy.utils import PrismaClient, ProxyLogging, hash_token, update_spend
 from litellm._logging import verbose_proxy_logger
 
 verbose_proxy_logger.setLevel(level=logging.DEBUG)
@@ -245,6 +246,44 @@ def test_call_with_valid_model(prisma_client):
         pytest.fail(f"An exception occurred - {str(e)}")
 
 
+def test_call_with_valid_model_using_all_models(prisma_client):
+    # Make a call to a key with model = `all-proxy-models` this is an Alias from LiteLLM Admin UI
+    setattr(litellm.proxy.proxy_server, "prisma_client", prisma_client)
+    setattr(litellm.proxy.proxy_server, "master_key", "sk-1234")
+    try:
+
+        async def test():
+            await litellm.proxy.proxy_server.prisma_client.connect()
+            request = GenerateKeyRequest(models=["all-proxy-models"])
+            key = await generate_key_fn(data=request)
+            print(key)
+
+            generated_key = key.key
+            bearer_token = "Bearer " + generated_key
+
+            request = Request(scope={"type": "http"})
+            request._url = URL(url="/chat/completions")
+
+            async def return_body():
+                return b'{"model": "mistral"}'
+
+            request.body = return_body
+
+            # use generated key to auth in
+            result = await user_api_key_auth(request=request, api_key=bearer_token)
+            print("result from user auth with new key", result)
+
+            # call /key/info for key - models == "all-proxy-models"
+            key_info = await info_key_fn(key=generated_key)
+            print("key_info", key_info)
+            models = key_info["info"]["models"]
+            assert models == ["all-proxy-models"]
+
+        asyncio.run(test())
+    except Exception as e:
+        pytest.fail(f"An exception occurred - {str(e)}")
+
+
 def test_call_with_user_over_budget(prisma_client):
     # 5. Make a call with a key over budget, expect to fail
     setattr(litellm.proxy.proxy_server, "prisma_client", prisma_client)
@@ -324,7 +363,7 @@ def test_call_with_end_user_over_budget(prisma_client):
 
     setattr(litellm.proxy.proxy_server, "prisma_client", prisma_client)
     setattr(litellm.proxy.proxy_server, "master_key", "sk-1234")
-    setattr(litellm, "max_user_budget", 0.00001)
+    setattr(litellm, "max_end_user_budget", 0.00001)
     try:
 
         async def test():
@@ -378,7 +417,9 @@ def test_call_with_end_user_over_budget(prisma_client):
                             "user_api_key_user_id": user,
                         },
                         "proxy_server_request": {
-                            "user": user,
+                            "body": {
+                                "user": user,
+                            }
                         },
                     },
                     "response_cost": 10,
@@ -407,18 +448,20 @@ def test_call_with_proxy_over_budget(prisma_client):
     litellm_proxy_budget_name = f"litellm-proxy-budget-{time.time()}"
     setattr(
         litellm.proxy.proxy_server,
-        "litellm_proxy_budget_name",
+        "litellm_proxy_admin_name",
         litellm_proxy_budget_name,
     )
+    setattr(litellm, "max_budget", 0.00001)
+    from litellm.proxy.proxy_server import user_api_key_cache
+
+    user_api_key_cache.set_cache(
+        key="{}:spend".format(litellm_proxy_budget_name), value=0
+    )
+    setattr(litellm.proxy.proxy_server, "user_api_key_cache", user_api_key_cache)
     try:
 
         async def test():
             await litellm.proxy.proxy_server.prisma_client.connect()
-            ## CREATE PROXY + USER BUDGET ##
-            request = NewUserRequest(
-                max_budget=0.00001, user_id=litellm_proxy_budget_name
-            )
-            await new_user(request)
             request = NewUserRequest()
             key = await new_user(request)
             print(key)
@@ -470,6 +513,7 @@ def test_call_with_proxy_over_budget(prisma_client):
                 start_time=datetime.now(),
                 end_time=datetime.now(),
             )
+
             await asyncio.sleep(5)
             # use generated key to auth in
             result = await user_api_key_auth(request=request, api_key=bearer_token)
@@ -571,9 +615,17 @@ def test_call_with_proxy_over_budget_stream(prisma_client):
     litellm_proxy_budget_name = f"litellm-proxy-budget-{time.time()}"
     setattr(
         litellm.proxy.proxy_server,
-        "litellm_proxy_budget_name",
+        "litellm_proxy_admin_name",
         litellm_proxy_budget_name,
     )
+    setattr(litellm, "max_budget", 0.00001)
+    from litellm.proxy.proxy_server import user_api_key_cache
+
+    user_api_key_cache.set_cache(
+        key="{}:spend".format(litellm_proxy_budget_name), value=0
+    )
+    setattr(litellm.proxy.proxy_server, "user_api_key_cache", user_api_key_cache)
+
     from litellm._logging import verbose_proxy_logger
     import logging
 
@@ -584,10 +636,10 @@ def test_call_with_proxy_over_budget_stream(prisma_client):
         async def test():
             await litellm.proxy.proxy_server.prisma_client.connect()
             ## CREATE PROXY + USER BUDGET ##
-            request = NewUserRequest(
-                max_budget=0.00001, user_id=litellm_proxy_budget_name
-            )
-            await new_user(request)
+            # request = NewUserRequest(
+            #     max_budget=0.00001, user_id=litellm_proxy_budget_name
+            # )
+            # await new_user(request)
             request = NewUserRequest()
             key = await new_user(request)
             print(key)
@@ -1089,9 +1141,9 @@ def test_call_with_key_over_budget(prisma_client):
             from litellm.caching import Cache
 
             litellm.cache = Cache()
-            import time
+            import time, uuid
 
-            request_id = f"chatcmpl-e41836bb-bb8b-4df2-8e70-8f3e160155ac{time.time()}"
+            request_id = f"chatcmpl-e41836bb-bb8b-4df2-8e70-8f3e160155ac{uuid.uuid4()}"
 
             resp = ModelResponse(
                 id=request_id,
@@ -1124,7 +1176,11 @@ def test_call_with_key_over_budget(prisma_client):
                 start_time=datetime.now(),
                 end_time=datetime.now(),
             )
-            await asyncio.sleep(10)
+            await update_spend(
+                prisma_client=prisma_client,
+                db_writer_client=None,
+                proxy_logging_obj=proxy_logging_obj,
+            )
             # test spend_log was written and we can read it
             spend_logs = await view_spend_logs(request_id=request_id)
 
@@ -1150,7 +1206,10 @@ def test_call_with_key_over_budget(prisma_client):
     except Exception as e:
         # print(f"Error - {str(e)}")
         traceback.print_exc()
-        error_detail = e.message
+        if hasattr(e, "message"):
+            error_detail = e.message
+        else:
+            error_detail = str(e)
         assert "Authentication Error, ExceededTokenBudget:" in error_detail
         print(vars(e))
 
@@ -1199,9 +1258,9 @@ def test_call_with_key_over_model_budget(prisma_client):
             from litellm.caching import Cache
 
             litellm.cache = Cache()
-            import time
+            import time, uuid
 
-            request_id = f"chatcmpl-e41836bb-bb8b-4df2-8e70-8f3e160155ac{time.time()}"
+            request_id = f"chatcmpl-{uuid.uuid4()}"
 
             resp = ModelResponse(
                 id=request_id,
@@ -1234,7 +1293,11 @@ def test_call_with_key_over_model_budget(prisma_client):
                 start_time=datetime.now(),
                 end_time=datetime.now(),
             )
-            await asyncio.sleep(10)
+            await update_spend(
+                prisma_client=prisma_client,
+                db_writer_client=None,
+                proxy_logging_obj=proxy_logging_obj,
+            )
             # test spend_log was written and we can read it
             spend_logs = await view_spend_logs(request_id=request_id)
 
@@ -1292,9 +1355,9 @@ async def test_call_with_key_never_over_budget(prisma_client):
             _PROXY_track_cost_callback as track_cost_callback,
         )
         from litellm import ModelResponse, Choices, Message, Usage
-        import time
+        import time, uuid
 
-        request_id = f"chatcmpl-e41836bb-bb8b-4df2-8e70-8f3e160155ac{time.time()}"
+        request_id = f"chatcmpl-{uuid.uuid4()}"
 
         resp = ModelResponse(
             id=request_id,
@@ -1329,7 +1392,11 @@ async def test_call_with_key_never_over_budget(prisma_client):
             start_time=datetime.now(),
             end_time=datetime.now(),
         )
-        await asyncio.sleep(5)
+        await update_spend(
+            prisma_client=prisma_client,
+            db_writer_client=None,
+            proxy_logging_obj=proxy_logging_obj,
+        )
         # use generated key to auth in
         result = await user_api_key_auth(request=request, api_key=bearer_token)
         print("result from user auth with new key", result)
@@ -1369,9 +1436,9 @@ async def test_call_with_key_over_budget_stream(prisma_client):
             _PROXY_track_cost_callback as track_cost_callback,
         )
         from litellm import ModelResponse, Choices, Message, Usage
-        import time
+        import time, uuid
 
-        request_id = f"chatcmpl-e41836bb-bb8b-4df2-8e70-8f3e160155ac{time.time()}"
+        request_id = f"chatcmpl-e41836bb-bb8b-4df2-8e70-8f3e160155ac{uuid.uuid4()}"
         resp = ModelResponse(
             id=request_id,
             choices=[
@@ -1405,7 +1472,11 @@ async def test_call_with_key_over_budget_stream(prisma_client):
             start_time=datetime.now(),
             end_time=datetime.now(),
         )
-        await asyncio.sleep(5)
+        await update_spend(
+            prisma_client=prisma_client,
+            db_writer_client=None,
+            proxy_logging_obj=proxy_logging_obj,
+        )
         # use generated key to auth in
         result = await user_api_key_auth(request=request, api_key=bearer_token)
         print("result from user auth with new key", result)

@@ -824,6 +824,32 @@ def test_bedrock_claude_3_streaming():
         pytest.fail(f"Error occurred: {e}")
 
 
+def test_claude_3_streaming_finish_reason():
+    try:
+        litellm.set_verbose = True
+        messages = [
+            {"role": "system", "content": "Be helpful"},
+            {"role": "user", "content": "What do you know?"},
+        ]
+        response: ModelResponse = completion(
+            model="claude-3-opus-20240229",
+            messages=messages,
+            stream=True,
+        )
+        complete_response = ""
+        # Add any assertions here to check the response
+        num_finish_reason = 0
+        for idx, chunk in enumerate(response):
+            if isinstance(chunk, ModelResponse):
+                if chunk.choices[0].finish_reason is not None:
+                    num_finish_reason += 1
+        assert num_finish_reason == 1
+    except RateLimitError:
+        pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
 @pytest.mark.skip(reason="Replicate changed exceptions")
 def test_completion_replicate_stream_bad_key():
     try:
@@ -948,6 +974,43 @@ def test_completion_bedrock_ai21_stream():
 # test_completion_bedrock_ai21_stream()
 
 
+def test_completion_bedrock_mistral_stream():
+    try:
+        litellm.set_verbose = False
+        response = completion(
+            model="bedrock/mistral.mixtral-8x7b-instruct-v0:1",
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Be as verbose as possible and give as many details as possible, how does a court case get to the Supreme Court?",
+                }
+            ],
+            temperature=1,
+            max_tokens=20,
+            stream=True,
+        )
+        print(response)
+        complete_response = ""
+        has_finish_reason = False
+        # Add any assertions here to check the response
+        for idx, chunk in enumerate(response):
+            # print
+            chunk, finished = streaming_format_tests(idx, chunk)
+            has_finish_reason = finished
+            complete_response += chunk
+            if finished:
+                break
+        if has_finish_reason is False:
+            raise Exception("finish reason not set for last chunk")
+        if complete_response.strip() == "":
+            raise Exception("Empty response received")
+        print(f"completion_response: {complete_response}")
+    except RateLimitError:
+        pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
 def test_sagemaker_weird_response():
     """
     When the stream ends, flush any remaining holding chunks.
@@ -1009,17 +1072,20 @@ def test_sagemaker_weird_response():
 # test_sagemaker_weird_response()
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
 @pytest.mark.asyncio
 async def test_sagemaker_streaming_async():
     try:
         messages = [{"role": "user", "content": "Hey, how's it going?"}]
         litellm.set_verbose = True
         response = await litellm.acompletion(
-            model="sagemaker/berri-benchmarking-Llama-2-70b-chat-hf-4",
+            model="sagemaker/jumpstart-dft-hf-llm-mistral-7b-ins-20240329-150233",
+            model_id="huggingface-llm-mistral-7b-instruct-20240329-150233",
             messages=messages,
-            max_tokens=100,
-            temperature=0.7,
+            temperature=0.2,
+            max_tokens=80,
+            aws_region_name=os.getenv("AWS_REGION_NAME_2"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID_2"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY_2"),
             stream=True,
         )
         # Add any assertions here to check the response
@@ -1048,14 +1114,17 @@ async def test_sagemaker_streaming_async():
 # asyncio.run(test_sagemaker_streaming_async())
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
 def test_completion_sagemaker_stream():
     try:
         response = completion(
-            model="sagemaker/berri-benchmarking-Llama-2-70b-chat-hf-4",
+            model="sagemaker/jumpstart-dft-hf-llm-mistral-7b-ins-20240329-150233",
+            model_id="huggingface-llm-mistral-7b-instruct-20240329-150233",
             messages=messages,
             temperature=0.2,
             max_tokens=80,
+            aws_region_name=os.getenv("AWS_REGION_NAME_2"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID_2"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY_2"),
             stream=True,
         )
         complete_response = ""
@@ -2212,3 +2281,71 @@ async def test_acompletion_claude_3_function_call_with_streaming():
         # raise Exception("it worked!")
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
+
+
+class ModelResponseIterator:
+    def __init__(self, model_response):
+        self.model_response = model_response
+        self.is_done = False
+
+    # Sync iterator
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.is_done:
+            raise StopIteration
+        self.is_done = True
+        return self.model_response
+
+    # Async iterator
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.is_done:
+            raise StopAsyncIteration
+        self.is_done = True
+        return self.model_response
+
+
+def test_unit_test_custom_stream_wrapper():
+    """
+    Test if last streaming chunk ends with '?', if the message repeats itself.
+    """
+    litellm.set_verbose = False
+    chunk = {
+        "id": "chatcmpl-123",
+        "object": "chat.completion.chunk",
+        "created": 1694268190,
+        "model": "gpt-3.5-turbo-0125",
+        "system_fingerprint": "fp_44709d6fcb",
+        "choices": [
+            {"index": 0, "delta": {"content": "How are you?"}, "finish_reason": "stop"}
+        ],
+    }
+    chunk = litellm.ModelResponse(**chunk, stream=True)
+
+    completion_stream = ModelResponseIterator(model_response=chunk)
+
+    response = litellm.CustomStreamWrapper(
+        completion_stream=completion_stream,
+        model="gpt-3.5-turbo",
+        custom_llm_provider="cached_response",
+        logging_obj=litellm.Logging(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": "Hey"}],
+            stream=True,
+            call_type="completion",
+            start_time=time.time(),
+            litellm_call_id="12345",
+            function_id="1245",
+        ),
+    )
+
+    freq = 0
+    for chunk in response:
+        if chunk.choices[0].delta.content is not None:
+            if "How are you?" in chunk.choices[0].delta.content:
+                freq += 1
+    assert freq == 1

@@ -59,7 +59,7 @@ from .integrations.helicone import HeliconeLogger
 from .integrations.aispend import AISpendLogger
 from .integrations.berrispend import BerriSpendLogger
 from .integrations.supabase import Supabase
-from .integrations.llmonitor import LLMonitorLogger
+from .integrations.lunary import LunaryLogger
 from .integrations.prompt_layer import PromptLayerLogger
 from .integrations.langsmith import LangsmithLogger
 from .integrations.weights_biases import WeightsBiasesLogger
@@ -129,7 +129,7 @@ dynamoLogger = None
 s3Logger = None
 genericAPILogger = None
 clickHouseLogger = None
-llmonitorLogger = None
+lunaryLogger = None
 aispendLogger = None
 berrispendLogger = None
 supabaseClient = None
@@ -354,7 +354,10 @@ class Choices(OpenAIObject):
         if message is None:
             self.message = Message(content=None)
         else:
-            self.message = message
+            if isinstance(message, Message):
+                self.message = message
+            elif isinstance(message, dict):
+                self.message = Message(**message)
         if logprobs is not None:
             self.logprobs = logprobs
         if enhancements is not None:
@@ -422,8 +425,11 @@ class StreamingChoices(OpenAIObject):
         else:
             self.finish_reason = None
         self.index = index
-        if delta:
-            self.delta = delta
+        if delta is not None:
+            if isinstance(delta, Delta):
+                self.delta = delta
+            if isinstance(delta, dict):
+                self.delta = Delta(**delta)
         else:
             self.delta = Delta()
         if enhancements is not None:
@@ -491,13 +497,33 @@ class ModelResponse(OpenAIObject):
     ):
         if stream is not None and stream == True:
             object = "chat.completion.chunk"
-            choices = [StreamingChoices()]
+            if choices is not None and isinstance(choices, list):
+                new_choices = []
+                for choice in choices:
+                    if isinstance(choice, StreamingChoices):
+                        _new_choice = choice
+                    elif isinstance(choice, dict):
+                        _new_choice = StreamingChoices(**choice)
+                    new_choices.append(_new_choice)
+                choices = new_choices
+            else:
+                choices = [StreamingChoices()]
         else:
             if model in litellm.open_ai_embedding_models:
                 object = "embedding"
             else:
                 object = "chat.completion"
-            choices = [Choices()]
+            if choices is not None and isinstance(choices, list):
+                new_choices = []
+                for choice in choices:
+                    if isinstance(choice, Choices):
+                        _new_choice = choice
+                    elif isinstance(choice, dict):
+                        _new_choice = Choices(**choice)
+                    new_choices.append(_new_choice)
+                choices = new_choices
+            else:
+                choices = [Choices()]
         if id is None:
             id = _generate_id()
         else:
@@ -626,6 +652,13 @@ class EmbeddingResponse(OpenAIObject):
             return self.dict()
 
 
+class Logprobs(OpenAIObject):
+    text_offset: List[int]
+    token_logprobs: List[float]
+    tokens: List[str]
+    top_logprobs: List[Dict[str, float]]
+
+
 class TextChoices(OpenAIObject):
     def __init__(self, finish_reason=None, index=0, text=None, logprobs=None, **params):
         super(TextChoices, self).__init__(**params)
@@ -638,10 +671,13 @@ class TextChoices(OpenAIObject):
             self.text = text
         else:
             self.text = None
-        if logprobs:
-            self.logprobs = []
+        if logprobs is None:
+            self.logprobs = None
         else:
-            self.logprobs = logprobs
+            if isinstance(logprobs, dict):
+                self.logprobs = Logprobs(**logprobs)
+            else:
+                self.logprobs = logprobs
 
     def __contains__(self, key):
         # Define custom behavior for the 'in' operator
@@ -686,6 +722,15 @@ class TextCompletionResponse(OpenAIObject):
     }
     """
 
+    id: str
+    object: str
+    created: int
+    model: Optional[str]
+    choices: List[TextChoices]
+    usage: Optional[Usage]
+    _response_ms: Optional[int] = None
+    _hidden_params: Optional[dict] = None
+
     def __init__(
         self,
         id=None,
@@ -695,32 +740,58 @@ class TextCompletionResponse(OpenAIObject):
         usage=None,
         stream=False,
         response_ms=None,
+        object=None,
         **params,
     ):
-        super(TextCompletionResponse, self).__init__(**params)
+
         if stream:
-            self.object = "text_completion.chunk"
-            self.choices = [TextChoices()]
+            object = "text_completion.chunk"
+            choices = [TextChoices()]
         else:
-            self.object = "text_completion"
-            self.choices = [TextChoices()]
+            object = "text_completion"
+            if choices is not None and isinstance(choices, list):
+                new_choices = []
+                for choice in choices:
+
+                    if isinstance(choice, TextChoices):
+                        _new_choice = choice
+                    elif isinstance(choice, dict):
+                        _new_choice = TextChoices(**choice)
+                    new_choices.append(_new_choice)
+                choices = new_choices
+            else:
+                choices = [TextChoices()]
+        if object is not None:
+            object = object
         if id is None:
-            self.id = _generate_id()
+            id = _generate_id()
         else:
-            self.id = id
+            id = id
         if created is None:
-            self.created = int(time.time())
+            created = int(time.time())
         else:
-            self.created = created
+            created = created
+
+        model = model
+        if usage:
+            usage = usage
+        else:
+            usage = Usage()
+
+        super(TextCompletionResponse, self).__init__(
+            id=id,
+            object=object,
+            created=created,
+            model=model,
+            choices=choices,
+            usage=usage,
+            **params,
+        )
+
         if response_ms:
             self._response_ms = response_ms
         else:
             self._response_ms = None
-        self.model = model
-        if usage:
-            self.usage = usage
-        else:
-            self.usage = Usage()
         self._hidden_params = (
             {}
         )  # used in case users want to access the original model response
@@ -826,9 +897,16 @@ class TranscriptionResponse(OpenAIObject):
 
 
 ############################################################
-def print_verbose(print_statement, logger_only: bool = False):
+def print_verbose(
+    print_statement,
+    logger_only: bool = False,
+    log_level: Literal["DEBUG", "INFO"] = "DEBUG",
+):
     try:
-        verbose_logger.debug(print_statement)
+        if log_level == "DEBUG":
+            verbose_logger.debug(print_statement)
+        elif log_level == "INFO":
+            verbose_logger.info(print_statement)
         if litellm.set_verbose == True and logger_only == False:
             print(print_statement)  # noqa
     except:
@@ -856,7 +934,7 @@ class CallTypes(Enum):
 
 # Logging function -> log the exact model details + what's being sent | Non-BlockingP
 class Logging:
-    global supabaseClient, liteDebuggerClient, promptLayerLogger, weightsBiasesLogger, langsmithLogger, capture_exception, add_breadcrumb, llmonitorLogger
+    global supabaseClient, liteDebuggerClient, promptLayerLogger, weightsBiasesLogger, langsmithLogger, capture_exception, add_breadcrumb, lunaryLogger
 
     def __init__(
         self,
@@ -877,10 +955,20 @@ class Logging:
             raise ValueError(
                 f"Invalid call_type {call_type}. Allowed values: {allowed_values}"
             )
-        if messages is not None and isinstance(messages, str):
-            messages = [
-                {"role": "user", "content": messages}
-            ]  # convert text completion input to the chat completion format
+        if messages is not None:
+            if isinstance(messages, str):
+                messages = [
+                    {"role": "user", "content": messages}
+                ]  # convert text completion input to the chat completion format
+            elif (
+                isinstance(messages, list)
+                and len(messages) > 0
+                and isinstance(messages[0], str)
+            ):
+                new_messages = []
+                for m in messages:
+                    new_messages.append({"role": "user", "content": m})
+                messages = new_messages
         self.model = model
         self.messages = messages
         self.stream = stream
@@ -1173,6 +1261,7 @@ class Logging:
                     or isinstance(result, EmbeddingResponse)
                     or isinstance(result, ImageResponse)
                     or isinstance(result, TranscriptionResponse)
+                    or isinstance(result, TextCompletionResponse)
                 )
                 and self.stream != True
             ):  # handle streaming separately
@@ -1403,27 +1492,35 @@ class Logging:
                             end_time=end_time,
                             print_verbose=print_verbose,
                         )
-                    if callback == "llmonitor":
-                        print_verbose("reaches llmonitor for logging!")
+                    if callback == "lunary":
+                        print_verbose("reaches lunary for logging!")
                         model = self.model
+                        kwargs = self.model_call_details
 
-                        input = self.model_call_details.get(
-                            "messages", self.model_call_details.get("input", None)
-                        )
+                        input = kwargs.get("messages", kwargs.get("input", None))
 
-                        # if contains input, it's 'embedding', otherwise 'llm'
                         type = (
                             "embed"
                             if self.call_type == CallTypes.embedding.value
                             else "llm"
                         )
 
-                        llmonitorLogger.log_event(
+                        # this only logs streaming once, complete_streaming_response exists i.e when stream ends
+                        if self.stream:
+                            if "complete_streaming_response" not in kwargs:
+                                break
+                            else:
+                                result = kwargs["complete_streaming_response"]
+
+                        lunaryLogger.log_event(
                             type=type,
+                            kwargs=kwargs,
                             event="end",
                             model=model,
                             input=input,
-                            user_id=self.model_call_details.get("user", "default"),
+                            user_id=kwargs.get("user", None),
+                            # user_props=self.model_call_details.get("user_props", None),
+                            extra=kwargs.get("optional_params", {}),
                             response_obj=result,
                             start_time=start_time,
                             end_time=end_time,
@@ -2015,8 +2112,8 @@ class Logging:
                             call_type=self.call_type,
                             stream=self.stream,
                         )
-                    elif callback == "llmonitor":
-                        print_verbose("reaches llmonitor for logging error!")
+                    elif callback == "lunary":
+                        print_verbose("reaches lunary for logging error!")
 
                         model = self.model
 
@@ -2028,7 +2125,7 @@ class Logging:
                             else "llm"
                         )
 
-                        llmonitorLogger.log_event(
+                        lunaryLogger.log_event(
                             type=_type,
                             event="error",
                             user_id=self.model_call_details.get("user", "default"),
@@ -2439,6 +2536,14 @@ def client(original_function):
             )
             raise e
 
+    def check_coroutine(value) -> bool:
+        if inspect.iscoroutine(value):
+            return True
+        elif inspect.iscoroutinefunction(value):
+            return True
+        else:
+            return False
+
     def post_call_processing(original_response, model):
         try:
             if original_response is None:
@@ -2449,16 +2554,58 @@ def client(original_function):
                     call_type == CallTypes.completion.value
                     or call_type == CallTypes.acompletion.value
                 ):
-                    model_response = original_response["choices"][0]["message"][
-                        "content"
-                    ]
-                    ### POST-CALL RULES ###
-                    rules_obj.post_call_rules(input=model_response, model=model)
+                    is_coroutine = check_coroutine(original_function)
+                    if is_coroutine == True:
+                        pass
+                    else:
+                        if isinstance(original_response, ModelResponse):
+                            model_response = original_response["choices"][0]["message"][
+                                "content"
+                            ]
+                            ### POST-CALL RULES ###
+                            rules_obj.post_call_rules(input=model_response, model=model)
         except Exception as e:
             raise e
 
     @wraps(original_function)
     def wrapper(*args, **kwargs):
+        # DO NOT MOVE THIS. It always needs to run first
+        # Check if this is an async function. If so only execute the async function
+        if (
+            kwargs.get("acompletion", False) == True
+            or kwargs.get("aembedding", False) == True
+            or kwargs.get("aimg_generation", False) == True
+            or kwargs.get("amoderation", False) == True
+            or kwargs.get("atext_completion", False) == True
+            or kwargs.get("atranscription", False) == True
+        ):
+            # [OPTIONAL] CHECK MAX RETRIES / REQUEST
+            if litellm.num_retries_per_request is not None:
+                # check if previous_models passed in as ['litellm_params']['metadata]['previous_models']
+                previous_models = kwargs.get("metadata", {}).get(
+                    "previous_models", None
+                )
+                if previous_models is not None:
+                    if litellm.num_retries_per_request <= len(previous_models):
+                        raise Exception(f"Max retries per request hit!")
+
+            # MODEL CALL
+            result = original_function(*args, **kwargs)
+            if "stream" in kwargs and kwargs["stream"] == True:
+                if (
+                    "complete_response" in kwargs
+                    and kwargs["complete_response"] == True
+                ):
+                    chunks = []
+                    for idx, chunk in enumerate(result):
+                        chunks.append(chunk)
+                    return litellm.stream_chunk_builder(
+                        chunks, messages=kwargs.get("messages", None)
+                    )
+                else:
+                    return result
+            return result
+
         # Prints Exactly what was passed to litellm function - don't execute any logic here - it should just print
         print_args_passed_to_litellm(original_function, args, kwargs)
         start_time = datetime.datetime.now()
@@ -2737,7 +2884,6 @@ def client(original_function):
                         or isinstance(e, openai.Timeout)
                         or isinstance(e, openai.APIConnectionError)
                     ):
-                        print_verbose(f"RETRY TRIGGERED!")
                         kwargs["num_retries"] = num_retries
                         return litellm.completion_with_retries(*args, **kwargs)
                 elif (
@@ -3560,6 +3706,8 @@ def token_counter(
             raise ValueError("text and messages cannot both be None")
     elif isinstance(text, List):
         text = "".join(t for t in text if isinstance(t, str))
+    elif isinstance(text, str):
+        count_response_tokens = True  # user just trying to count tokens for a text. don't add the chat_ml +3 tokens to this
 
     if model is not None:
         tokenizer_json = _select_tokenizer(model=model)
@@ -4380,7 +4528,7 @@ def get_optional_params(
         if unsupported_params and not litellm.drop_params:
             raise UnsupportedParamsError(
                 status_code=500,
-                message=f"{custom_llm_provider} does not support parameters: {unsupported_params}. To drop these, set `litellm.drop_params=True`.",
+                message=f"{custom_llm_provider} does not support parameters: {unsupported_params}. To drop these, set `litellm.drop_params=True` or for proxy:\n\n`litellm_settings:\n drop_params: true`\n",
             )
 
     def _map_and_modify_arg(supported_params: dict, provider: str, model: str):
@@ -5616,7 +5764,7 @@ def get_api_key(llm_provider: str, dynamic_api_key: Optional[str]):
     elif llm_provider == "baseten":
         api_key = api_key or litellm.baseten_key or get_secret("BASETEN_API_KEY")
     # cohere
-    elif llm_provider == "cohere":
+    elif llm_provider == "cohere" or llm_provider == "cohere_chat":
         api_key = api_key or litellm.cohere_key or get_secret("COHERE_API_KEY")
     # huggingface
     elif llm_provider == "huggingface":
@@ -6127,7 +6275,9 @@ def validate_environment(model: Optional[str] = None) -> dict:
 
 
 def set_callbacks(callback_list, function_id=None):
-    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, llmonitorLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger
+
+    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger
+
     try:
         for callback in callback_list:
             print_verbose(f"callback: {callback}")
@@ -6187,8 +6337,8 @@ def set_callbacks(callback_list, function_id=None):
                 print_verbose("Initialized Athina Logger")
             elif callback == "helicone":
                 heliconeLogger = HeliconeLogger()
-            elif callback == "llmonitor":
-                llmonitorLogger = LLMonitorLogger()
+            elif callback == "lunary":
+                lunaryLogger = LunaryLogger()
             elif callback == "promptlayer":
                 promptLayerLogger = PromptLayerLogger()
             elif callback == "langfuse":
@@ -6196,7 +6346,8 @@ def set_callbacks(callback_list, function_id=None):
             elif callback == "datadog":
                 dataDogLogger = DataDogLogger()
             elif callback == "prometheus":
-                prometheusLogger = PrometheusLogger()
+                if prometheusLogger is None:
+                    prometheusLogger = PrometheusLogger()
             elif callback == "dynamodb":
                 dynamoLogger = DyanmoDBLogger()
             elif callback == "s3":
@@ -6230,7 +6381,7 @@ def set_callbacks(callback_list, function_id=None):
 
 # NOTE: DEPRECATING this in favor of using failure_handler() in Logging:
 def handle_failure(exception, traceback_exception, start_time, end_time, args, kwargs):
-    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, llmonitorLogger
+    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger
     try:
         # print_verbose(f"handle_failure args: {args}")
         # print_verbose(f"handle_failure kwargs: {kwargs}")
@@ -6977,7 +7128,10 @@ def exception_type(
                 or custom_llm_provider in litellm.openai_compatible_providers
             ):
                 # custom_llm_provider is openai, make it OpenAI
-                message = original_exception.message
+                if hasattr(original_exception, "message"):
+                    message = original_exception.message
+                else:
+                    message = str(original_exception)
                 if message is not None and isinstance(message, str):
                     message = message.replace("OPENAI", custom_llm_provider.upper())
                     message = message.replace("openai", custom_llm_provider)
@@ -7126,10 +7280,12 @@ def exception_type(
                 else:
                     # if no status code then it is an APIConnectionError: https://github.com/openai/openai-python#handling-errors
                     raise APIConnectionError(
-                        __cause__=original_exception.__cause__,
+                        message=f"{exception_provider} - {message}",
                         llm_provider=custom_llm_provider,
                         model=model,
-                        request=original_exception.request,
+                        request=httpx.Request(
+                            method="POST", url="https://api.openai.com/v1/"
+                        ),
                     )
             elif custom_llm_provider == "anthropic":  # one of the anthropics
                 if hasattr(original_exception, "message"):
@@ -7211,7 +7367,7 @@ def exception_type(
                         exception_mapping_worked = True
                         raise APIError(
                             status_code=original_exception.status_code,
-                            message=f"AnthropicException - {original_exception.message}",
+                            message=f"AnthropicException - {original_exception.message}. Handle with `litellm.APIError`.",
                             llm_provider="anthropic",
                             model=model,
                             request=original_exception.request,
@@ -8199,14 +8355,10 @@ def exception_type(
                 else:
                     # if no status code then it is an APIConnectionError: https://github.com/openai/openai-python#handling-errors
                     raise APIConnectionError(
-                        __cause__=original_exception.__cause__,
+                        message=f"{exception_provider} - {message}",
                         llm_provider="azure",
                         model=model,
-                        request=getattr(
-                            original_exception,
-                            "request",
-                            httpx.Request(method="POST", url="https://openai.com/"),
-                        ),
+                        request=httpx.Request(method="POST", url="https://openai.com/"),
                     )
         if (
             "BadRequestError.__init__() missing 1 required positional argument: 'param'"
@@ -8291,34 +8443,6 @@ def get_or_generate_uuid():
         # [Non-Blocking Error]
         return
     return uuid_value
-
-
-def litellm_telemetry(data):
-    # Load or generate the UUID
-    uuid_value = ""
-    try:
-        uuid_value = get_or_generate_uuid()
-    except:
-        uuid_value = str(uuid.uuid4())
-    try:
-        # Prepare the data to send to litellm logging api
-        try:
-            pkg_version = importlib.metadata.version("litellm")
-        except:
-            pkg_version = None
-        if "model" not in data:
-            data["model"] = None
-        payload = {"uuid": uuid_value, "data": data, "version:": pkg_version}
-        # Make the POST request to litellm logging api
-        response = requests.post(
-            "https://litellm-logging.onrender.com/logging",
-            headers={"Content-Type": "application/json"},
-            json=payload,
-        )
-        response.raise_for_status()  # Raise an exception for HTTP errors
-    except:
-        # [Non-Blocking Error]
-        return
 
 
 ######### Secret Manager ############################
@@ -8881,37 +9005,20 @@ class CustomStreamWrapper:
     def handle_openai_text_completion_chunk(self, chunk):
         try:
             print_verbose(f"\nRaw OpenAI Chunk\n{chunk}\n")
-            str_line = chunk
             text = ""
             is_finished = False
             finish_reason = None
-            if "data: [DONE]" in str_line or self.sent_last_chunk == True:
-                raise StopIteration
-            elif str_line.startswith("data:"):
-                data_json = json.loads(str_line[5:])
-                print_verbose(f"delta content: {data_json}")
-                text = data_json["choices"][0].get("text", "")
-                if data_json["choices"][0].get("finish_reason", None):
+            choices = getattr(chunk, "choices", [])
+            if len(choices) > 0:
+                text = choices[0].text
+                if choices[0].finish_reason is not None:
                     is_finished = True
-                    finish_reason = data_json["choices"][0]["finish_reason"]
-                print_verbose(
-                    f"text: {text}; is_finished: {is_finished}; finish_reason: {finish_reason}"
-                )
-                return {
-                    "text": text,
-                    "is_finished": is_finished,
-                    "finish_reason": finish_reason,
-                }
-            elif "error" in str_line:
-                raise ValueError(
-                    f"Unable to parse response. Original response: {str_line}"
-                )
-            else:
-                return {
-                    "text": text,
-                    "is_finished": is_finished,
-                    "finish_reason": finish_reason,
-                }
+                    finish_reason = choices[0].finish_reason
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
 
         except Exception as e:
             raise e
@@ -9079,6 +9186,17 @@ class CustomStreamWrapper:
                 if chunk_data["delta"].get("text", None) is not None:
                     text = chunk_data["delta"]["text"]
                 stop_reason = chunk_data["delta"].get("stop_reason", None)
+                if stop_reason != None:
+                    is_finished = True
+                    finish_reason = stop_reason
+            ######## bedrock.mistral mappings ###############
+            elif "outputs" in chunk_data:
+                if (
+                    len(chunk_data["outputs"]) == 1
+                    and chunk_data["outputs"][0].get("text", None) is not None
+                ):
+                    text = chunk_data["outputs"][0]["text"]
+                stop_reason = chunk_data.get("stop_reason", None)
                 if stop_reason != None:
                     is_finished = True
                     finish_reason = stop_reason
@@ -9539,6 +9657,9 @@ class CustomStreamWrapper:
                 else:
                     return
             elif self.received_finish_reason is not None:
+                if self.sent_last_chunk == True:
+                    raise StopIteration
+
                 # flush any remaining holding chunk
                 if len(self.holding_chunk) > 0:
                     if model_response.choices[0].delta.content is None:
@@ -9552,6 +9673,7 @@ class CustomStreamWrapper:
                 is_delta_empty = self.is_delta_empty(
                     delta=model_response.choices[0].delta
                 )
+
                 if is_delta_empty:
                     # get any function call arguments
                     model_response.choices[0].finish_reason = map_finish_reason(
@@ -9678,7 +9800,14 @@ class CustomStreamWrapper:
             threading.Thread(
                 target=self.logging_obj.failure_handler, args=(e, traceback_exception)
             ).start()
-            raise e
+            if isinstance(e, OpenAIError):
+                raise e
+            else:
+                raise exception_type(
+                    model=self.model,
+                    original_exception=e,
+                    custom_llm_provider=self.custom_llm_provider,
+                )
 
     async def __anext__(self):
         try:
@@ -10293,22 +10422,28 @@ def print_args_passed_to_litellm(original_function, args, kwargs):
 
         args_str = ", ".join(map(repr, args))
         kwargs_str = ", ".join(f"{key}={repr(value)}" for key, value in kwargs.items())
-        print_verbose("\n")  # new line before
-        print_verbose("\033[92mRequest to litellm:\033[0m")
+        print_verbose("\n", log_level="INFO")  # new line before
+        print_verbose("\033[92mRequest to litellm:\033[0m", log_level="INFO")
         if args and kwargs:
             print_verbose(
-                f"\033[92mlitellm.{original_function.__name__}({args_str}, {kwargs_str})\033[0m"
+                f"\033[92mlitellm.{original_function.__name__}({args_str}, {kwargs_str})\033[0m",
+                log_level="INFO",
             )
         elif args:
             print_verbose(
-                f"\033[92mlitellm.{original_function.__name__}({args_str})\033[0m"
+                f"\033[92mlitellm.{original_function.__name__}({args_str})\033[0m",
+                log_level="INFO",
             )
         elif kwargs:
             print_verbose(
-                f"\033[92mlitellm.{original_function.__name__}({kwargs_str})\033[0m"
+                f"\033[92mlitellm.{original_function.__name__}({kwargs_str})\033[0m",
+                log_level="INFO",
             )
         else:
-            print_verbose(f"\033[92mlitellm.{original_function.__name__}()\033[0m")
+            print_verbose(
+                f"\033[92mlitellm.{original_function.__name__}()\033[0m",
+                log_level="INFO",
+            )
         print_verbose("\n")  # new line after
     except:
         # This should always be non blocking

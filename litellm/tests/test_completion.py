@@ -41,7 +41,7 @@ def test_completion_custom_provider_model_name():
             messages=messages,
             logger_fn=logger_fn,
         )
-        # Add any assertions here to check the,response
+        # Add any assertions here to check the response
         print(response)
         print(response["choices"][0]["finish_reason"])
     except litellm.Timeout as e:
@@ -76,6 +76,8 @@ def test_completion_claude():
         print(response["usage"]["completion_tokens"])
         # print("new cost tracking")
     except Exception as e:
+        if "overloaded_error" in str(e):
+            pass
         pytest.fail(f"Error occurred: {e}")
 
 
@@ -191,6 +193,48 @@ def test_completion_claude_3_function_call():
         print(second_response)
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
+
+
+def test_parse_xml_params():
+    from litellm.llms.prompt_templates.factory import parse_xml_params
+
+    ## SCENARIO 1 ## - W/ ARRAY
+    xml_content = """<invoke><tool_name>return_list_of_str</tool_name>\n<parameters>\n<value>\n<item>apple</item>\n<item>banana</item>\n<item>orange</item>\n</value>\n</parameters></invoke>"""
+    json_schema = {
+        "properties": {
+            "value": {
+                "items": {"type": "string"},
+                "title": "Value",
+                "type": "array",
+            }
+        },
+        "required": ["value"],
+        "type": "object",
+    }
+    response = parse_xml_params(xml_content=xml_content, json_schema=json_schema)
+
+    print(f"response: {response}")
+    assert response["value"] == ["apple", "banana", "orange"]
+
+    ## SCENARIO 2 ## - W/OUT ARRAY
+    xml_content = """<invoke><tool_name>get_current_weather</tool_name>\n<parameters>\n<location>Boston, MA</location>\n<unit>fahrenheit</unit>\n</parameters></invoke>"""
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "location": {
+                "type": "string",
+                "description": "The city and state, e.g. San Francisco, CA",
+            },
+            "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+        },
+        "required": ["location"],
+    }
+
+    response = parse_xml_params(xml_content=xml_content, json_schema=json_schema)
+
+    print(f"response: {response}")
+    assert response["location"] == "Boston, MA"
+    assert response["unit"] == "fahrenheit"
 
 
 def test_completion_claude_3_multi_turn_conversations():
@@ -1105,6 +1149,7 @@ def test_completion_openai_litellm_key():
 # test_ completion_openai_litellm_key()
 
 
+@pytest.mark.skip(reason="Unresponsive endpoint.[TODO] Rehost this somewhere else")
 def test_completion_ollama_hosted():
     try:
         litellm.request_timeout = 20  # give ollama 20 seconds to response
@@ -1717,16 +1762,19 @@ def test_customprompt_together_ai():
 # test_customprompt_together_ai()
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
 def test_completion_sagemaker():
     try:
         litellm.set_verbose = True
         print("testing sagemaker")
         response = completion(
-            model="sagemaker/berri-benchmarking-Llama-2-70b-chat-hf-4",
+            model="sagemaker/jumpstart-dft-hf-llm-mistral-7b-ins-20240329-150233",
+            model_id="huggingface-llm-mistral-7b-instruct-20240329-150233",
             messages=messages,
             temperature=0.2,
             max_tokens=80,
+            aws_region_name=os.getenv("AWS_REGION_NAME_2"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID_2"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY_2"),
             input_cost_per_second=0.000420,
         )
         # Add any assertions here to check the response
@@ -1743,33 +1791,29 @@ def test_completion_sagemaker():
 # test_completion_sagemaker()
 
 
-@pytest.mark.skip(reason="AWS Suspended Account")
-def test_completion_sagemaker_stream():
+@pytest.mark.asyncio
+async def test_acompletion_sagemaker():
     try:
-        litellm.set_verbose = False
+        litellm.set_verbose = True
         print("testing sagemaker")
-        response = completion(
-            model="sagemaker/berri-benchmarking-Llama-2-70b-chat-hf-4",
+        response = await litellm.acompletion(
+            model="sagemaker/jumpstart-dft-hf-llm-mistral-7b-ins-20240329-150233",
+            model_id="huggingface-llm-mistral-7b-instruct-20240329-150233",
             messages=messages,
             temperature=0.2,
             max_tokens=80,
-            stream=True,
+            aws_region_name=os.getenv("AWS_REGION_NAME_2"),
+            aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID_2"),
+            aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY_2"),
+            input_cost_per_second=0.000420,
         )
-
-        complete_streaming_response = ""
-        first_chunk_id, chunk_id = None, None
-        for i, chunk in enumerate(response):
-            print(chunk)
-            chunk_id = chunk.id
-            print(chunk_id)
-            if i == 0:
-                first_chunk_id = chunk_id
-            else:
-                assert chunk_id == first_chunk_id
-            complete_streaming_response += chunk.choices[0].delta.content or ""
         # Add any assertions here to check the response
-        # print(response)
-        assert len(complete_streaming_response) > 0
+        print(response)
+        cost = completion_cost(completion_response=response)
+        print("calculated cost", cost)
+        assert (
+            cost > 0.0 and cost < 1.0
+        )  # should never be > $1 for a single completion call
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 

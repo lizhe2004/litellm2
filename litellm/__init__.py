@@ -1,6 +1,6 @@
 ### INIT VARIABLES ###
 import threading, requests, os
-from typing import Callable, List, Optional, Dict, Union, Any
+from typing import Callable, List, Optional, Dict, Union, Any, Literal
 from litellm.caching import Cache
 from litellm._logging import set_verbose, _turn_on_debug, verbose_logger
 from litellm.proxy._types import KeyManagementSystem, KeyManagementSettings
@@ -64,6 +64,7 @@ google_moderation_confidence_threshold: Optional[float] = None
 llamaguard_unsafe_content_categories: Optional[str] = None
 blocked_user_list: Optional[Union[str, List]] = None
 banned_keywords_list: Optional[Union[str, List]] = None
+llm_guard_mode: Literal["all", "key-specific"] = "all"
 ##################
 logging: bool = True
 caching: bool = (
@@ -75,6 +76,8 @@ caching_with_models: bool = (
 cache: Optional[Cache] = (
     None  # cache object <- use this - https://docs.litellm.ai/docs/caching
 )
+default_in_memory_ttl: Optional[float] = None
+default_redis_ttl: Optional[float] = None
 model_alias_map: Dict[str, str] = {}
 model_group_alias_map: Dict[str, str] = {}
 max_budget: float = 0.0  # set the max budget across all providers
@@ -173,6 +176,7 @@ upperbound_key_generate_params: Optional[Dict] = None
 default_user_params: Optional[Dict] = None
 default_team_settings: Optional[List] = None
 max_user_budget: Optional[float] = None
+max_end_user_budget: Optional[float] = None
 #### RELIABILITY ####
 request_timeout: Optional[float] = 6000
 num_retries: Optional[int] = None  # per model endpoint
@@ -344,7 +348,7 @@ replicate_models: List = [
     "replicate/vicuna-13b:6282abe6a492de4145d7bb601023762212f9ddbbe78278bd6771c8b3b2f2a13b",
     "joehoover/instructblip-vicuna13b:c4c54e3c8c97cd50c2d2fec9be3b6065563ccf7d43787fb99f84151b867178fe",
     # Flan T-5
-    "daanelson/flan-t5-large:ce962b3f6792a57074a601d3979db5839697add2e4e02696b3ced4c022d4767f"
+    "daanelson/flan-t5-large:ce962b3f6792a57074a601d3979db5839697add2e4e02696b3ced4c022d4767f",
     # Others
     "replicate/dolly-v2-12b:ef0e1aefc61f8e096ebe4db6b2bacc297daf2ef6899f0f7e001ec445893500e5",
     "replit/replit-code-v1-3b:b84f4c074b807211cd75e3e8b1589b6399052125b4c27106e43d47189e8415ad",
@@ -445,6 +449,7 @@ model_list = (
     + deepinfra_models
     + perplexity_models
     + maritalk_models
+    + vertex_language_models
 )
 
 provider_list: List = [
