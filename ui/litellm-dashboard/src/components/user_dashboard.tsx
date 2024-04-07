@@ -123,7 +123,7 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
       } else {
         const fetchData = async () => {
           try {
-            const response = await userInfoCall(accessToken, userID, userRole);
+            const response = await userInfoCall(accessToken, userID, userRole, false, null, null);
             console.log(
               `received teams in user dashboard: ${Object.keys(
                 response
@@ -217,10 +217,10 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
 
           <ViewKeyTable
             userID={userID}
+            userRole={userRole}
             accessToken={accessToken}
             selectedTeam={selectedTeam ? selectedTeam : null}
             data={keys}
-            userModels={userModels}
             setData={setKeys}
           />
           <CreateKey

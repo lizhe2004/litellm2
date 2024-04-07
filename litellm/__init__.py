@@ -260,6 +260,7 @@ open_ai_chat_completion_models: List = []
 open_ai_text_completion_models: List = []
 cohere_models: List = []
 cohere_chat_models: List = []
+mistral_chat_models: List = []
 anthropic_models: List = []
 openrouter_models: List = []
 vertex_language_models: List = []
@@ -269,6 +270,7 @@ vertex_code_chat_models: List = []
 vertex_text_models: List = []
 vertex_code_text_models: List = []
 vertex_embedding_models: List = []
+vertex_anthropic_models: List = []
 ai21_models: List = []
 nlp_cloud_models: List = []
 aleph_alpha_models: List = []
@@ -284,6 +286,8 @@ for key, value in model_cost.items():
         cohere_models.append(key)
     elif value.get("litellm_provider") == "cohere_chat":
         cohere_chat_models.append(key)
+    elif value.get("litellm_provider") == "mistral":
+        mistral_chat_models.append(key)
     elif value.get("litellm_provider") == "anthropic":
         anthropic_models.append(key)
     elif value.get("litellm_provider") == "openrouter":
@@ -302,6 +306,9 @@ for key, value in model_cost.items():
         vertex_code_chat_models.append(key)
     elif value.get("litellm_provider") == "vertex_ai-embedding-models":
         vertex_embedding_models.append(key)
+    elif value.get("litellm_provider") == "vertex_ai-anthropic_models":
+        key = key.replace("vertex_ai/", "")
+        vertex_anthropic_models.append(key)
     elif value.get("litellm_provider") == "ai21":
         ai21_models.append(key)
     elif value.get("litellm_provider") == "nlp_cloud":
@@ -588,6 +595,7 @@ from .utils import (
     _should_retry,
     get_secret,
     get_supported_openai_params,
+    get_api_base,
 )
 from .llms.huggingface_restapi import HuggingfaceConfig
 from .llms.anthropic import AnthropicConfig
@@ -603,6 +611,7 @@ from .llms.nlp_cloud import NLPCloudConfig
 from .llms.aleph_alpha import AlephAlphaConfig
 from .llms.petals import PetalsConfig
 from .llms.vertex_ai import VertexAIConfig
+from .llms.vertex_ai_anthropic import VertexAIAnthropicConfig
 from .llms.sagemaker import SagemakerConfig
 from .llms.ollama import OllamaConfig
 from .llms.ollama_chat import OllamaChatConfig

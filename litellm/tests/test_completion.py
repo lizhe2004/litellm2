@@ -7,13 +7,13 @@ import os, io
 
 sys.path.insert(
     0, os.path.abspath("../..")
-)  # Adds the parent directory to the system path
+)  # Adds the parent directory to the, system path
 import pytest
 import litellm
 from litellm import embedding, completion, completion_cost, Timeout
 from litellm import RateLimitError
 
-# litellm.num_retries = 3
+# litellm.num_retries=3
 litellm.cache = None
 litellm.success_callback = []
 user_message = "Write a short poem about the sky"
@@ -50,7 +50,22 @@ def test_completion_custom_provider_model_name():
         pytest.fail(f"Error occurred: {e}")
 
 
-# test_completion_custom_provider_model_name()
+def test_completion_azure_command_r():
+    try:
+        litellm.set_verbose = True
+
+        response = completion(
+            model="azure/command-r-plus",
+            api_base=os.getenv("AZURE_COHERE_API_BASE"),
+            api_key=os.getenv("AZURE_COHERE_API_KEY"),
+            messages=[{"role": "user", "content": "What is the meaning of life?"}],
+        )
+
+        print(response)
+    except litellm.Timeout as e:
+        pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
 
 
 def test_completion_claude():
@@ -1762,6 +1777,7 @@ def test_customprompt_together_ai():
 # test_customprompt_together_ai()
 
 
+@pytest.mark.skip(reason="AWS Suspended Account")
 def test_completion_sagemaker():
     try:
         litellm.set_verbose = True
@@ -1791,6 +1807,7 @@ def test_completion_sagemaker():
 # test_completion_sagemaker()
 
 
+@pytest.mark.skip(reason="AWS Suspended Account")
 @pytest.mark.asyncio
 async def test_acompletion_sagemaker():
     try:

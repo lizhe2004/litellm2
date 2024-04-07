@@ -9,6 +9,11 @@ jobs:
       - checkout
 
       - run:
+          name: Show git commit hash
+          command: |
+            echo "Git commit hash: $CIRCLE_SHA1"
+
+      - run:
           name: Check if litellm dir was updated or if pyproject.toml was modified
           command: |
             if [ -n "$(git diff --name-only $CIRCLE_SHA1^..$CIRCLE_SHA1 | grep -E 'pyproject\.toml|litellm/')" ]; then
@@ -35,12 +40,13 @@ jobs:
             pip install "aioboto3==12.3.0"
             pip install langchain
             pip install lunary==0.2.5
-            pip install "langfuse>=2.0.0"
+            pip install "langfuse==2.7.3"
             pip install numpydoc
             pip install traceloop-sdk==0.0.69
             pip install openai
             pip install prisma            
             pip install "httpx==0.24.1"
+            pip install fastapi
             pip install "gunicorn==21.2.0"
             pip install "anyio==3.7.1"
             pip install "aiodynamo==23.10.1"
@@ -73,7 +79,7 @@ jobs:
           name: Linting Testing
           command: |
             cd litellm
-            python -m pip install types-requests types-setuptools types-redis
+            python -m pip install types-requests types-setuptools types-redis types-PyYAML
             if ! python -m mypy . --ignore-missing-imports; then
               echo "mypy detected errors"
               exit 1
@@ -292,7 +298,7 @@ jobs:
               -H "Accept: application/vnd.github.v3+json" \
               -H "Authorization: Bearer $GITHUB_TOKEN" \
               "https://api.github.com/repos/BerriAI/litellm/actions/workflows/ghcr_deploy.yml/dispatches" \
-              -d "{\"ref\":\"main\", \"inputs\":{\"tag\":\"v${VERSION}\"}}"
+              -d "{\"ref\":\"main\", \"inputs\":{\"tag\":\"v${VERSION}\", \"commit_hash\":\"$CIRCLE_SHA1\"}}"
 
 workflows:
   version: 2
