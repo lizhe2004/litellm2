@@ -97,6 +97,8 @@ from litellm.proxy.utils import (
     _is_projected_spend_over_limit,
     _get_projected_spend_over_limit,
     update_spend,
+    encrypt_value,
+    decrypt_value,
 )
 from litellm.proxy.secret_managers.google_kms import load_google_kms
 from litellm.proxy.secret_managers.aws_secret_manager import load_aws_secret_manager
@@ -104,6 +106,8 @@ import pydantic
 from litellm.proxy._types import *
 from litellm.caching import DualCache, RedisCache
 from litellm.proxy.health_check import perform_health_check
+from litellm.router import LiteLLM_Params, Deployment
+from litellm.router import ModelInfo as RouterModelInfo
 from litellm._logging import verbose_router_logger, verbose_proxy_logger
 from litellm.proxy.auth.handle_jwt import JWTHandler
 from litellm.proxy.hooks.prompt_injection_detection import (
@@ -2371,6 +2375,71 @@ class ProxyConfig:
         router = litellm.Router(**router_params)  # type:ignore
         return router, model_list, general_settings
 
+    async def add_deployment(
+        self,
+        prisma_client: PrismaClient,
+        proxy_logging_obj: ProxyLogging,
+    ):
+        """
+        - Check db for new models (last 10 most recently updated)
+        - Check if model id's in router already
+        - If not, add to router
+        """
+        global llm_router, llm_model_list, master_key
+
+        import base64
+
+        try:
+            if llm_router is None:
+                raise Exception("No router initialized")
+
+            if master_key is None or not isinstance(master_key, str):
+                raise Exception(
+                    f"Master key is not initialized or formatted. master_key={master_key}"
+                )
+
+            new_models = await prisma_client.db.litellm_proxymodeltable.find_many(
+                take=10, order={"updated_at": "desc"}
+            )
+
+            for m in new_models:
+                _litellm_params = m.litellm_params
+                if isinstance(_litellm_params, dict):
+                    # decrypt values
+                    for k, v in _litellm_params.items():
+                        if isinstance(v, str):
+                            # decode base64
+                            decoded_b64 = base64.b64decode(v)
+                            # decrypt value
+                            _litellm_params[k] = decrypt_value(
+                                value=decoded_b64, master_key=master_key
+                            )
+                    _litellm_params = LiteLLM_Params(**_litellm_params)
+                else:
+                    verbose_proxy_logger.error(
+                        f"Invalid model added to proxy db. Invalid litellm params. litellm_params={_litellm_params}"
+                    )
+                    continue  # skip to next model
+
+                if m.model_info is not None and isinstance(m.model_info, dict):
+                    if "id" not in m.model_info:
+                        m.model_info["id"] = m.model_id
+                    _model_info = RouterModelInfo(**m.model_info)
+                else:
+                    _model_info = RouterModelInfo(id=m.model_id)
+
+                llm_router.add_deployment(
+                    deployment=Deployment(
+                        model_name=m.model_name,
+                        litellm_params=_litellm_params,
+                        model_info=_model_info,
+                    )
+                )
+
+            llm_model_list = llm_router.get_model_list()
+        except Exception as e:
+            verbose_proxy_logger.error("{}".format(str(e)))
+
 
 proxy_config = ProxyConfig()
 
@@ -2550,7 +2619,7 @@ async def generate_key_helper_fn(
                 # do not create a key for litellm_proxy_budget_name or if table name is set to just 'user'
                 # we only need to ensure this exists in the user table
                 # the LiteLLM_VerificationToken table will increase in size if we don't do this check
-                return key_data
+                return user_data
 
             ## CREATE KEY
             verbose_proxy_logger.debug("prisma_client: Creating Key= %s", key_data)
@@ -2596,9 +2665,15 @@ async def delete_verification_token(tokens: List, user_id: Optional[str] = None)
     try:
         if prisma_client:
             # Assuming 'db' is your Prisma Client instance
-            deleted_tokens = await prisma_client.delete_data(
-                tokens=tokens, user_id=user_id
-            )
+            # check if admin making request - don't filter by user-id
+            if user_id == litellm_proxy_admin_name:
+                deleted_tokens = await prisma_client.delete_data(tokens=tokens)
+            # else
+            else:
+                deleted_tokens = await prisma_client.delete_data(
+                    tokens=tokens, user_id=user_id
+                )
+
         else:
             raise Exception
     except Exception as e:
@@ -2943,7 +3018,7 @@ async def startup_event():
     if prisma_client is not None:
         create_view_response = await prisma_client.check_view_exists()
 
-    ### START BATCH WRITING DB ###
+    ### START BATCH WRITING DB + CHECKING NEW MODELS###
     if prisma_client is not None:
         scheduler = AsyncIOScheduler()
         interval = random.randint(
@@ -2966,6 +3041,15 @@ async def startup_event():
             seconds=batch_writing_interval,
             args=[prisma_client, db_writer_client, proxy_logging_obj],
         )
+
+        ### ADD NEW MODELS ###
+        if general_settings.get("store_model_in_db", False) == True:
+            scheduler.add_job(
+                proxy_config.add_deployment,
+                "interval",
+                seconds=30,
+                args=[prisma_client, proxy_logging_obj],
+            )
         scheduler.start()
 
 
@@ -3126,14 +3210,20 @@ async def completion(
 
         if hasattr(response, "_hidden_params"):
             model_id = response._hidden_params.get("model_id", None) or ""
+            original_response = (
+                response._hidden_params.get("original_response", None) or ""
+            )
         else:
             model_id = ""
+            original_response = ""
 
         verbose_proxy_logger.debug("final response: %s", response)
         if (
             "stream" in data and data["stream"] == True
         ):  # use generate_responses to stream responses
-            custom_headers = {"x-litellm-model-id": model_id}
+            custom_headers = {
+                "x-litellm-model-id": model_id,
+            }
             selected_data_generator = select_data_generator(
                 response=response, user_api_key_dict=user_api_key_dict
             )
@@ -3306,8 +3396,6 @@ async def chat_completion(
             )
         )
 
-        start_time = time.time()
-
         ### ROUTE THE REQUEST ###
         # Do not change this - it should be a constant time fetch - ALWAYS
         router_model_names = llm_router.model_names if llm_router is not None else []
@@ -3353,17 +3441,22 @@ async def chat_completion(
         )  # run the moderation check in parallel to the actual llm api call
         response = responses[1]
 
+        hidden_params = getattr(response, "_hidden_params", {}) or {}
+        model_id = hidden_params.get("model_id", None) or ""
+        cache_key = hidden_params.get("cache_key", None) or ""
+
         # Post Call Processing
+        if llm_router is not None:
+            data["deployment"] = llm_router.get_deployment(model_id=model_id)
         data["litellm_status"] = "success"  # used for alerting
-        if hasattr(response, "_hidden_params"):
-            model_id = response._hidden_params.get("model_id", None) or ""
-        else:
-            model_id = ""
 
         if (
             "stream" in data and data["stream"] == True
         ):  # use generate_responses to stream responses
-            custom_headers = {"x-litellm-model-id": model_id}
+            custom_headers = {
+                "x-litellm-model-id": model_id,
+                "x-litellm-cache-key": cache_key,
+            }
             selected_data_generator = select_data_generator(
                 response=response, user_api_key_dict=user_api_key_dict
             )
@@ -3374,6 +3467,7 @@ async def chat_completion(
             )
 
         fastapi_response.headers["x-litellm-model-id"] = model_id
+        fastapi_response.headers["x-litellm-cache-key"] = cache_key
 
         ### CALL HOOKS ### - modify outgoing data
         response = await proxy_logging_obj.post_call_success_hook(
@@ -3525,8 +3619,6 @@ async def embeddings(
         data = await proxy_logging_obj.pre_call_hook(
             user_api_key_dict=user_api_key_dict, data=data, call_type="embeddings"
         )
-
-        start_time = time.time()
 
         ## ROUTE TO CORRECT ENDPOINT ##
         # skip router if user passed their key
@@ -4343,7 +4435,7 @@ async def delete_key_fn(
             raise HTTPException(
                 status_code=400,
                 detail={
-                    "error": "Not all keys passed in were deleted. This probably means you don't have access to delete all the keys passed in."
+                    "error": f"Not all keys passed in were deleted. This probably means you don't have access to delete all the keys passed in. Keys passed in={len(keys)}, Deleted keys ={number_deleted_keys['deleted_keys']}"
                 },
             )
 
@@ -4647,6 +4739,73 @@ async def view_spend_tags(
         GROUP BY individual_request_tag;
         """
         response = await get_spend_by_tags(
+            start_date=start_date, end_date=end_date, prisma_client=prisma_client
+        )
+
+        return response
+    except Exception as e:
+        if isinstance(e, HTTPException):
+            raise ProxyException(
+                message=getattr(e, "detail", f"/spend/tags Error({str(e)})"),
+                type="internal_error",
+                param=getattr(e, "param", "None"),
+                code=getattr(e, "status_code", status.HTTP_500_INTERNAL_SERVER_ERROR),
+            )
+        elif isinstance(e, ProxyException):
+            raise e
+        raise ProxyException(
+            message="/spend/tags Error" + str(e),
+            type="internal_error",
+            param=getattr(e, "param", "None"),
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
+
+
+@router.get(
+    "/global/spend/tags",
+    tags=["Budget & Spend Tracking"],
+    dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
+    responses={
+        200: {"model": List[LiteLLM_SpendLogs]},
+    },
+)
+async def global_view_spend_tags(
+    start_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time from which to start viewing key spend",
+    ),
+    end_date: Optional[str] = fastapi.Query(
+        default=None,
+        description="Time till which to view key spend",
+    ),
+):
+    """
+    LiteLLM Enterprise - View Spend Per Request Tag. Used by LiteLLM UI
+
+    Example Request:
+    ```
+    curl -X GET "http://0.0.0.0:8000/spend/tags" \
+-H "Authorization: Bearer sk-1234"
+    ```
+
+    Spend with Start Date and End Date
+    ```
+    curl -X GET "http://0.0.0.0:8000/spend/tags?start_date=2022-01-01&end_date=2022-02-01" \
+-H "Authorization: Bearer sk-1234"
+    ```
+    """
+
+    from enterprise.utils import ui_get_spend_by_tags
+
+    global prisma_client
+    try:
+        if prisma_client is None:
+            raise Exception(
+                f"Database not connected. Connect a database to your proxy - https://docs.litellm.ai/docs/simple_proxy#managing-auth---virtual-keys"
+            )
+
+        response = await ui_get_spend_by_tags(
             start_date=start_date, end_date=end_date, prisma_client=prisma_client
         )
 
@@ -5246,12 +5405,14 @@ async def new_user(data: NewUserRequest):
 
     Parameters:
     - user_id: Optional[str] - Specify a user id. If not set, a unique id will be generated.
+    - user_alias: Optional[str] - A descriptive name for you to know who this user id refers to.
     - user_email: Optional[str] - Specify a user email.
     - user_role: Optional[str] - Specify a user role - "admin", "app_owner", "app_user"
     - max_budget: Optional[float] - Specify max budget for a given user.
     - models: Optional[list] - Model_name's a user is allowed to call. (if empty, key is allowed to call all models)
     - tpm_limit: Optional[int] - Specify tpm limit for a given user (Tokens per minute)
     - rpm_limit: Optional[int] - Specify rpm limit for a given user (Requests per minute)
+    - auto_create_key: bool - Default=True. Flag used for returning a key as part of the /user/new response
 
     Returns:
     - key: (str) The generated api key for the user
@@ -5272,10 +5433,15 @@ async def new_user(data: NewUserRequest):
                 )
     if "user_id" in data_json and data_json["user_id"] is None:
         data_json["user_id"] = str(uuid.uuid4())
+    auto_create_key = data_json.pop("auto_create_key", True)
+    if auto_create_key == False:
+        data_json["table_name"] = (
+            "user"  # only create a user, don't create key if 'auto_create_key' set to False
+        )
     response = await generate_key_helper_fn(**data_json)
     return NewUserResponse(
-        key=response["token"],
-        expires=response["expires"],
+        key=response.get("token", ""),
+        expires=response.get("expires", None),
         user_id=response["user_id"],
         max_budget=response["max_budget"],
     )
@@ -6015,6 +6181,7 @@ async def update_team(
 
     if data.team_id is None:
         raise HTTPException(status_code=400, detail={"error": "No team id passed in"})
+    verbose_proxy_logger.debug("/team/update - %s", data)
 
     existing_team_row = await prisma_client.get_data(
         team_id=data.team_id, table_name="team", query_type="find_unique"
@@ -6065,7 +6232,7 @@ async def update_team(
     ## Get diff
     if existing_team_row.members_with_roles is not None:
         for user in existing_team_row.members_with_roles:
-            if user["user_id"] not in new_user_id_list:
+            if user["user_id"] not in new_user_id_list and len(new_user_id_list) > 0:
                 deleted_user_id_list.append(user["user_id"])
 
     ## SET UPDATED LIST
@@ -6683,30 +6850,56 @@ async def info_budget(data: BudgetRequest):
     tags=["model management"],
     dependencies=[Depends(user_api_key_auth)],
 )
-async def add_new_model(model_params: ModelParams):
-    global llm_router, llm_model_list, general_settings, user_config_file_path, proxy_config
+async def add_new_model(
+    model_params: Deployment,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    global llm_router, llm_model_list, general_settings, user_config_file_path, proxy_config, prisma_client, master_key
     try:
-        # Load existing config
-        config = await proxy_config.get_config()
+        import base64
 
-        verbose_proxy_logger.debug("User config path: %s", user_config_file_path)
+        global prisma_client
 
-        verbose_proxy_logger.debug("Loaded config: %s", config)
-        # Add the new model to the config
-        model_info = model_params.model_info.json()
-        model_info = {k: v for k, v in model_info.items() if v is not None}
-        config["model_list"].append(
-            {
-                "model_name": model_params.model_name,
-                "litellm_params": model_params.litellm_params,
-                "model_info": model_info,
-            }
-        )
+        if prisma_client is None:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "No DB Connected. Here's how to do it - https://docs.litellm.ai/docs/proxy/virtual_keys"
+                },
+            )
 
-        verbose_proxy_logger.debug("updated model list: %s", config["model_list"])
-
-        # Save new config
-        await proxy_config.save_config(new_config=config)
+        # update DB
+        if general_settings.get("store_model_in_db", False) == True:
+            """
+            - store model_list in db
+            - store keys separately
+            """
+            # encrypt litellm params #
+            _litellm_params_dict = model_params.litellm_params.dict(exclude_none=True)
+            for k, v in _litellm_params_dict.items():
+                if isinstance(v, str):
+                    encrypted_value = encrypt_value(value=v, master_key=master_key)  # type: ignore
+                    model_params.litellm_params[k] = base64.b64encode(
+                        encrypted_value
+                    ).decode("utf-8")
+            await prisma_client.db.litellm_proxymodeltable.create(
+                data={
+                    "model_name": model_params.model_name,
+                    "litellm_params": model_params.litellm_params.model_dump_json(exclude_none=True),  # type: ignore
+                    "model_info": model_params.model_info.model_dump_json(  # type: ignore
+                        exclude_none=True
+                    ),
+                    "created_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+                    "updated_by": user_api_key_dict.user_id or litellm_proxy_admin_name,
+                }
+            )
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Set `store_model_in_db: true` in general_settings on your config.yaml"
+                },
+            )
         return {"message": "Model added successfully"}
 
     except Exception as e:
@@ -6733,6 +6926,7 @@ async def add_new_model(model_params: ModelParams):
     description="v2 - returns all the models set on the config.yaml, shows 'user_access' = True if the user has access to the model. Provides more info about each model in /models, including config.yaml descriptions (except api key and api base)",
     tags=["model management"],
     dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
 )
 async def model_info_v2(
     user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
@@ -6742,10 +6936,18 @@ async def model_info_v2(
     """
     global llm_model_list, general_settings, user_config_file_path, proxy_config
 
+    if llm_model_list is None or not isinstance(llm_model_list, list):
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": f"Invalid llm model list. llm_model_list={llm_model_list}"
+            },
+        )
+
     # Load existing config
     config = await proxy_config.get_config()
 
-    all_models = config.get("model_list", [])
+    all_models = llm_model_list
     if user_model is not None:
         # if user does not use a config.yaml, https://github.com/BerriAI/litellm/issues/2061
         all_models += [user_model]
@@ -6876,14 +7078,16 @@ async def model_info_v1(
 ):
     global llm_model_list, general_settings, user_config_file_path, proxy_config
 
-    # Load existing config
-    config = await proxy_config.get_config()
+    if llm_model_list is None:
+        raise HTTPException(
+            status_code=500, detail={"error": "LLM Model List not loaded in"}
+        )
 
     if len(user_api_key_dict.models) > 0:
         model_names = user_api_key_dict.models
-        all_models = [m for m in config["model_list"] if m["model_name"] in model_names]
+        all_models = [m for m in llm_model_list if m["model_name"] in model_names]
     else:
-        all_models = config["model_list"]
+        all_models = llm_model_list
     for model in all_models:
         # provided model_info in config.yaml
         model_info = model.get("model_info", {})
@@ -6934,36 +7138,40 @@ async def model_info_v1(
 async def delete_model(model_info: ModelInfoDelete):
     global llm_router, llm_model_list, general_settings, user_config_file_path, proxy_config
     try:
-        if not os.path.exists(user_config_file_path):
-            raise HTTPException(status_code=404, detail="Config file does not exist.")
+        """
+        [BETA] - This is a beta endpoint, format might change based on user feedback. - https://github.com/BerriAI/litellm/issues/964
 
-        # Load existing config
-        config = await proxy_config.get_config()
+        - Check if id in db
+        - Delete
+        """
 
-        # If model_list is not in the config, nothing can be deleted
-        if len(config.get("model_list", [])) == 0:
+        global prisma_client
+
+        if prisma_client is None:
             raise HTTPException(
-                status_code=400, detail="No model list available in the config."
+                status_code=500,
+                detail={
+                    "error": "No DB Connected. Here's how to do it - https://docs.litellm.ai/docs/proxy/virtual_keys"
+                },
             )
 
-        # Check if the model with the specified model_id exists
-        model_to_delete = None
-        for model in config["model_list"]:
-            if model.get("model_info", {}).get("id", None) == model_info.id:
-                model_to_delete = model
-                break
-
-        # If the model was not found, return an error
-        if model_to_delete is None:
-            raise HTTPException(
-                status_code=400, detail="Model with given model_id not found."
+        # update DB
+        if general_settings.get("store_model_in_db", False) == True:
+            """
+            - store model_list in db
+            - store keys separately
+            """
+            # encrypt litellm params #
+            await prisma_client.db.litellm_proxymodeltable.delete(
+                where={"model_id": model_info.id}
             )
-
-        # Remove model from the list and save the updated config
-        config["model_list"].remove(model_to_delete)
-
-        # Save updated config
-        config = await proxy_config.save_config(new_config=config)
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Set `store_model_in_db: true` in general_settings on your config.yaml"
+                },
+            )
         return {"message": "Model deleted successfully"}
 
     except Exception as e:
@@ -8091,6 +8299,51 @@ async def cache_ping():
         raise HTTPException(
             status_code=503,
             detail=f"Service Unhealthy ({str(e)}).Cache parameters: {litellm_cache_params}.specific_cache_params: {specific_cache_params}",
+        )
+
+
+@router.post(
+    "/cache/delete",
+    tags=["caching"],
+    dependencies=[Depends(user_api_key_auth)],
+)
+async def cache_delete(request: Request):
+    """
+    Endpoint for deleting a key from the cache. All responses from litellm proxy have `x-litellm-cache-key` in the headers
+
+    Parameters:
+    - **keys**: *Optional[List[str]]* - A list of keys to delete from the cache. Example {"keys": ["key1", "key2"]}
+
+    ```shell
+    curl -X POST "http://0.0.0.0:4000/cache/delete" \
+    -H "Authorization: Bearer sk-1234" \
+    -d '{"keys": ["key1", "key2"]}'
+    ```
+
+    """
+    try:
+        if litellm.cache is None:
+            raise HTTPException(
+                status_code=503, detail="Cache not initialized. litellm.cache is None"
+            )
+
+        request_data = await request.json()
+        keys = request_data.get("keys", None)
+
+        if litellm.cache.type == "redis":
+            await litellm.cache.delete_cache_keys(keys=keys)
+            return {
+                "status": "success",
+            }
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Cache type {litellm.cache.type} does not support deleting a key. only `redis` is supported",
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Cache Delete Failed({str(e)})",
         )
 
 

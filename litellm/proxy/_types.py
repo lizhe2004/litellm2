@@ -215,7 +215,7 @@ class ProxyChatCompletionRequest(LiteLLMBase):
 
 
 class ModelInfoDelete(LiteLLMBase):
-    id: Optional[str]
+    id: str
 
 
 class ModelInfo(LiteLLMBase):
@@ -363,6 +363,9 @@ class NewUserRequest(GenerateKeyRequest):
     max_budget: Optional[float] = None
     user_email: Optional[str] = None
     user_role: Optional[str] = None
+    auto_create_key: bool = (
+        True  # flag used for returning a key as part of the /user/new response
+    )
 
 
 class NewUserResponse(GenerateKeyResponse):

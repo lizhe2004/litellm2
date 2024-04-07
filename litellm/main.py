@@ -12,6 +12,7 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
+
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -61,6 +62,7 @@ from .llms import (
     palm,
     gemini,
     vertex_ai,
+    vertex_ai_anthropic,
     maritalk,
 )
 from .llms.openai import OpenAIChatCompletion, OpenAITextCompletion
@@ -607,6 +609,7 @@ def completion(
         "cache",
         "no-log",
         "base_model",
+        "stream_timeout",
     ]
     default_params = openai_params + litellm_params
     non_default_params = {
@@ -1057,6 +1060,7 @@ def completion(
                 api_key=api_key,
                 api_base=api_base,
                 acompletion=acompletion,
+                client=client,  # pass AsyncOpenAI, OpenAI client
                 logging_obj=logging,
                 optional_params=optional_params,
                 litellm_params=litellm_params,
@@ -1673,20 +1677,36 @@ def completion(
                 or get_secret("VERTEXAI_LOCATION")
             )
 
-            model_response = vertex_ai.completion(
-                model=model,
-                messages=messages,
-                model_response=model_response,
-                print_verbose=print_verbose,
-                optional_params=optional_params,
-                litellm_params=litellm_params,
-                logger_fn=logger_fn,
-                encoding=encoding,
-                vertex_location=vertex_ai_location,
-                vertex_project=vertex_ai_project,
-                logging_obj=logging,
-                acompletion=acompletion,
-            )
+            if "claude-3" in model:
+                model_response = vertex_ai_anthropic.completion(
+                    model=model,
+                    messages=messages,
+                    model_response=model_response,
+                    print_verbose=print_verbose,
+                    optional_params=optional_params,
+                    litellm_params=litellm_params,
+                    logger_fn=logger_fn,
+                    encoding=encoding,
+                    vertex_location=vertex_ai_location,
+                    vertex_project=vertex_ai_project,
+                    logging_obj=logging,
+                    acompletion=acompletion,
+                )
+            else:
+                model_response = vertex_ai.completion(
+                    model=model,
+                    messages=messages,
+                    model_response=model_response,
+                    print_verbose=print_verbose,
+                    optional_params=optional_params,
+                    litellm_params=litellm_params,
+                    logger_fn=logger_fn,
+                    encoding=encoding,
+                    vertex_location=vertex_ai_location,
+                    vertex_project=vertex_ai_project,
+                    logging_obj=logging,
+                    acompletion=acompletion,
+                )
 
             if (
                 "stream" in optional_params

@@ -1033,7 +1033,7 @@ class OpenAITextCompletion(BaseLLM):
             ):
                 prompt = messages[0]["content"]
             else:
-                prompt = " ".join([message["content"] for message in messages])  # type: ignore
+                prompt = [message["content"] for message in messages]  # type: ignore
 
             # don't send max retries to the api, if set
 
@@ -1153,7 +1153,9 @@ class OpenAITextCompletion(BaseLLM):
                 },
             )
             ## RESPONSE OBJECT
-            return TextCompletionResponse(**response_json)
+            response_obj = TextCompletionResponse(**response_json)
+            response_obj._hidden_params.original_response = json.dumps(response_json)
+            return response_obj
         except Exception as e:
             raise e
 

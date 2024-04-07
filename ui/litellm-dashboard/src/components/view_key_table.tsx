@@ -1,6 +1,6 @@
 "use client";
 import React, { useEffect, useState } from "react";
-import { keyDeleteCall } from "./networking";
+import { keyDeleteCall, modelAvailableCall } from "./networking";
 import { InformationCircleIcon, StatusOnlineIcon, TrashIcon, PencilAltIcon } from "@heroicons/react/outline";
 import { keySpendLogsCall, PredictedSpendLogsCall, keyUpdateCall } from "./networking";
 import {
@@ -47,9 +47,9 @@ interface EditKeyModalProps {
 // Define the props type
 interface ViewKeyTableProps {
   userID: string;
+  userRole: string | null;
   accessToken: string;
   selectedTeam: any | null;
-  userModels: string[];
   data: any[] | null;
   setData: React.Dispatch<React.SetStateAction<any[] | null>>;
 }
@@ -63,6 +63,7 @@ interface ItemData {
   tpm_limit: string | null;
   rpm_limit: string | null;
   token: string;
+  token_id: string | null;
   id: number;
   team_id: string;
   metadata: any;
@@ -72,9 +73,9 @@ interface ItemData {
 
 const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
   userID,
+  userRole,
   accessToken,
   selectedTeam,
-  userModels,
   data,
   setData,
 }) => {
@@ -90,18 +91,39 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
 
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [selectedToken, setSelectedToken] = useState<ItemData | null>(null);
+  const [userModels, setUserModels] = useState([]);
+
+  useEffect(() => {
+    const fetchUserModels = async () => {
+      try {
+        if (userID === null) {
+          return;
+        }
+
+        if (accessToken !== null && userRole !== null) {
+          const model_available = await modelAvailableCall(accessToken, userID, userRole);
+          let available_model_names = model_available["data"].map(
+            (element: { id: string }) => element.id
+          );
+          console.log("available_model_names:", available_model_names);
+          setUserModels(available_model_names);
+        }
+      } catch (error) {
+        console.error("Error fetching user models:", error);
+      }
+    };
+  
+    fetchUserModels();
+  }, [accessToken, userID, userRole]);
 
   const EditKeyModal: React.FC<EditKeyModalProps> = ({ visible, onCancel, token, onSubmit }) => {
     const [form] = Form.useForm();
 
-    // check token.models length == 0
-    if (token.models.length == 0 && selectedTeam) {
-      token.models = selectedTeam.models;
-      
-    }
+    console.log("in edit key modal:", token);
+    console.log("in edit key modal, team:", selectedTeam);
 
+    
 
-  
     const handleOk = () => {
       form
         .validateFields()
@@ -215,9 +237,12 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
     console.log("handleEditClick:", token);
 
     // set token.token to token.token_id if token_id is not null
-    if (token.token_id !== null) {
-      token.token = token.token_id;
+    if (token.token == null) {
+      if (token.token_id !== null) {
+        token.token = token.token_id;
+      }
     }
+
     setSelectedToken(token);
     setEditModalVisible(true);
   };
@@ -295,13 +320,19 @@ const handleEditSubmit = async (formValues: Record<string, any>) => {
 
   
 
-  const handleDelete = async (token: string) => {
+  const handleDelete = async (token: any) => {
+    console.log("handleDelete:", token);
+    if (token.token == null) {
+      if (token.token_id !== null) {
+        token.token = token.token_id;
+      }
+    }
     if (data == null) {
       return;
     }
 
     // Set the key to delete and open the confirmation modal
-    setKeyToDelete(token);
+    setKeyToDelete(token.token);
     localStorage.removeItem("userData" + userID);
     setIsDeleteModalOpen(true);
   };
@@ -593,7 +624,7 @@ const handleEditSubmit = async (formValues: Record<string, any>) => {
                     onClick={() => handleEditClick(item)}
                   />
                   <Icon
-                    onClick={() => handleDelete(item.token)}
+                    onClick={() => handleDelete(item)}
                     icon={TrashIcon}
                     size="sm"
                   />

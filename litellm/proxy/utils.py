@@ -13,6 +13,7 @@ from litellm.proxy._types import (
     Member,
 )
 from litellm.caching import DualCache, RedisCache
+from litellm.router import Deployment, ModelInfo, LiteLLM_Params
 from litellm.llms.custom_httpx.httpx_handler import HTTPHandler
 from litellm.proxy.hooks.parallel_request_limiter import (
     _PROXY_MaxParallelRequestsHandler,
@@ -181,6 +182,25 @@ class ProxyLogging:
                 raise e
         return data
 
+    def _response_taking_too_long_callback(
+        self,
+        kwargs,  # kwargs to completion
+        start_time,
+        end_time,  # start/end time
+    ):
+        try:
+            time_difference = end_time - start_time
+            # Convert the timedelta to float (in seconds)
+            time_difference_float = time_difference.total_seconds()
+            litellm_params = kwargs.get("litellm_params", {})
+            api_base = litellm_params.get("api_base", "")
+            model = kwargs.get("model", "")
+            messages = kwargs.get("messages", "")
+
+            return time_difference_float, model, api_base, messages
+        except Exception as e:
+            raise e
+
     async def response_taking_too_long_callback(
         self,
         kwargs,  # kwargs to completion
@@ -190,13 +210,13 @@ class ProxyLogging:
     ):
         if self.alerting is None:
             return
-        time_difference = end_time - start_time
-        # Convert the timedelta to float (in seconds)
-        time_difference_float = time_difference.total_seconds()
-        litellm_params = kwargs.get("litellm_params", {})
-        api_base = litellm_params.get("api_base", "")
-        model = kwargs.get("model", "")
-        messages = kwargs.get("messages", "")
+        time_difference_float, model, api_base, messages = (
+            self._response_taking_too_long_callback(
+                kwargs=kwargs,
+                start_time=start_time,
+                end_time=end_time,
+            )
+        )
         request_info = f"\nRequest Model: `{model}`\nAPI Base: `{api_base}`\nMessages: `{messages}`"
         slow_message = f"`Responses are slow - {round(time_difference_float,2)}s response time > Alerting threshold: {self.alerting_threshold}s`"
         if time_difference_float > self.alerting_threshold:
@@ -243,6 +263,20 @@ class ProxyLogging:
                 request_data is not None
                 and request_data.get("litellm_status", "") != "success"
             ):
+                if request_data.get("deployment", None) is not None and isinstance(
+                    request_data["deployment"], dict
+                ):
+                    _api_base = litellm.get_api_base(
+                        model=model,
+                        optional_params=request_data["deployment"].get(
+                            "litellm_params", {}
+                        ),
+                    )
+
+                    if _api_base is None:
+                        _api_base = ""
+
+                    request_info += f"\nAPI Base: {_api_base}"
                 # only alert hanging responses if they have not been marked as success
                 alerting_message = (
                     f"`Requests are hanging - {self.alerting_threshold}s+ request time`"
@@ -2316,6 +2350,45 @@ def _is_user_proxy_admin(user_id_information=None):
         return True
 
     return False
+
+
+def encrypt_value(value: str, master_key: str):
+    import hashlib
+    import nacl.secret
+    import nacl.utils
+
+    # get 32 byte master key #
+    hash_object = hashlib.sha256(master_key.encode())
+    hash_bytes = hash_object.digest()
+
+    # initialize secret box #
+    box = nacl.secret.SecretBox(hash_bytes)
+
+    # encode message #
+    value_bytes = value.encode("utf-8")
+
+    encrypted = box.encrypt(value_bytes)
+
+    return encrypted
+
+
+def decrypt_value(value: bytes, master_key: str) -> str:
+    import hashlib
+    import nacl.secret
+    import nacl.utils
+
+    # get 32 byte master key #
+    hash_object = hashlib.sha256(master_key.encode())
+    hash_bytes = hash_object.digest()
+
+    # initialize secret box #
+    box = nacl.secret.SecretBox(hash_bytes)
+
+    # Convert the bytes object to a string
+    plaintext = box.decrypt(value)
+
+    plaintext = plaintext.decode("utf-8")  # type: ignore
+    return plaintext  # type: ignore
 
 
 # LiteLLM Admin UI - Non SSO Login
