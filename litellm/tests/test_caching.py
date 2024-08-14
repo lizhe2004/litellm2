@@ -1,6 +1,9 @@
-import sys, os, uuid
+import os
+import sys
 import time
 import traceback
+import uuid
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -9,12 +12,15 @@ import os
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
-import pytest
-import litellm
-from litellm import embedding, completion, aembedding
-from litellm.caching import Cache
+import asyncio
+import hashlib
 import random
-import hashlib, asyncio
+
+import pytest
+
+import litellm
+from litellm import aembedding, completion, embedding
+from litellm.caching import Cache
 
 # litellm.set_verbose=True
 
@@ -201,11 +207,17 @@ async def test_caching_with_cache_controls(sync_flag):
         else:
             ## TTL = 0
             response1 = await litellm.acompletion(
-                model="gpt-3.5-turbo", messages=messages, cache={"ttl": 0}
+                model="gpt-3.5-turbo",
+                messages=messages,
+                cache={"ttl": 0},
+                mock_response="Hello world",
             )
             await asyncio.sleep(10)
             response2 = await litellm.acompletion(
-                model="gpt-3.5-turbo", messages=messages, cache={"s-maxage": 10}
+                model="gpt-3.5-turbo",
+                messages=messages,
+                cache={"s-maxage": 10},
+                mock_response="Hello world",
             )
 
             assert response2["id"] != response1["id"]
@@ -214,21 +226,33 @@ async def test_caching_with_cache_controls(sync_flag):
         ## TTL = 5
         if sync_flag:
             response1 = completion(
-                model="gpt-3.5-turbo", messages=messages, cache={"ttl": 5}
+                model="gpt-3.5-turbo",
+                messages=messages,
+                cache={"ttl": 5},
+                mock_response="Hello world",
             )
             response2 = completion(
-                model="gpt-3.5-turbo", messages=messages, cache={"s-maxage": 5}
+                model="gpt-3.5-turbo",
+                messages=messages,
+                cache={"s-maxage": 5},
+                mock_response="Hello world",
             )
             print(f"response1: {response1}")
             print(f"response2: {response2}")
             assert response2["id"] == response1["id"]
         else:
             response1 = await litellm.acompletion(
-                model="gpt-3.5-turbo", messages=messages, cache={"ttl": 25}
+                model="gpt-3.5-turbo",
+                messages=messages,
+                cache={"ttl": 25},
+                mock_response="Hello world",
             )
             await asyncio.sleep(10)
             response2 = await litellm.acompletion(
-                model="gpt-3.5-turbo", messages=messages, cache={"s-maxage": 25}
+                model="gpt-3.5-turbo",
+                messages=messages,
+                cache={"s-maxage": 25},
+                mock_response="Hello world",
             )
             print(f"response1: {response1}")
             print(f"response2: {response2}")
@@ -275,6 +299,61 @@ def test_caching_with_models_v2():
 
 
 # test_caching_with_models_v2()
+
+
+def c():
+    litellm.enable_caching_on_provider_specific_optional_params = True
+    messages = [
+        {"role": "user", "content": "who is ishaan CTO of litellm from litellm 2023"}
+    ]
+    litellm.cache = Cache()
+    print("test2 for caching")
+    litellm.set_verbose = True
+
+    response1 = completion(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        top_k=10,
+        caching=True,
+        mock_response="Hello: {}".format(uuid.uuid4()),
+    )
+    response2 = completion(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        top_k=10,
+        caching=True,
+        mock_response="Hello: {}".format(uuid.uuid4()),
+    )
+    response3 = completion(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        top_k=9,
+        caching=True,
+        mock_response="Hello: {}".format(uuid.uuid4()),
+    )
+    print(f"response1: {response1}")
+    print(f"response2: {response2}")
+    print(f"response3: {response3}")
+    litellm.cache = None
+    litellm.success_callback = []
+    litellm._async_success_callback = []
+    if (
+        response3["choices"][0]["message"]["content"]
+        == response2["choices"][0]["message"]["content"]
+    ):
+        # if models are different, it should not return cached response
+        print(f"response2: {response2}")
+        print(f"response3: {response3}")
+        pytest.fail(f"Error occurred:")
+    if (
+        response1["choices"][0]["message"]["content"]
+        != response2["choices"][0]["message"]["content"]
+    ):
+        print(f"response1: {response1}")
+        print(f"response2: {response2}")
+        pytest.fail(f"Error occurred:")
+    litellm.enable_caching_on_provider_specific_optional_params = False
+
 
 embedding_large_text = (
     """
@@ -599,7 +678,10 @@ def test_redis_cache_completion():
     )
     print("test2 for Redis Caching - non streaming")
     response1 = completion(
-        model="gpt-3.5-turbo", messages=messages, caching=True, max_tokens=20
+        model="gpt-3.5-turbo",
+        messages=messages,
+        caching=True,
+        max_tokens=20,
     )
     response2 = completion(
         model="gpt-3.5-turbo", messages=messages, caching=True, max_tokens=20
@@ -874,6 +956,81 @@ async def test_redis_cache_acompletion_stream_bedrock():
     except Exception as e:
         print(e)
         raise e
+
+
+def test_disk_cache_completion():
+    litellm.set_verbose = False
+
+    random_number = random.randint(
+        1, 100000
+    )  # add a random number to ensure it's always adding / reading from cache
+    messages = [
+        {"role": "user", "content": f"write a one sentence poem about: {random_number}"}
+    ]
+    litellm.cache = Cache(
+        type="disk",
+    )
+
+    response1 = completion(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        caching=True,
+        max_tokens=20,
+        mock_response="This number is so great!",
+    )
+    # response2 is mocked to a different response from response1,
+    # but the completion from the cache should be used instead of the mock
+    # response since the input is the same as response1
+    response2 = completion(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        caching=True,
+        max_tokens=20,
+        mock_response="This number is awful!",
+    )
+    # Since the parameters are not the same as response1, response3 should actually
+    # be the mock response
+    response3 = completion(
+        model="gpt-3.5-turbo",
+        messages=messages,
+        caching=True,
+        temperature=0.5,
+        mock_response="This number is awful!",
+    )
+
+    print("\nresponse 1", response1)
+    print("\nresponse 2", response2)
+    print("\nresponse 3", response3)
+    # print("\nresponse 4", response4)
+    litellm.cache = None
+    litellm.success_callback = []
+    litellm._async_success_callback = []
+
+    # 1 & 2 should be exactly the same
+    # 1 & 3 should be different, since input params are diff
+    if (
+        response1["choices"][0]["message"]["content"]
+        != response2["choices"][0]["message"]["content"]
+    ):  # 1 and 2 should be the same
+        # 1&2 have the exact same input params. This MUST Be a CACHE HIT
+        print(f"response1: {response1}")
+        print(f"response2: {response2}")
+        pytest.fail(f"Error occurred:")
+    if (
+        response1["choices"][0]["message"]["content"]
+        == response3["choices"][0]["message"]["content"]
+    ):
+        # if input params like max_tokens, temperature are diff it should NOT be a cache hit
+        print(f"response1: {response1}")
+        print(f"response3: {response3}")
+        pytest.fail(
+            f"Response 1 == response 3. Same model, diff params shoudl not cache Error"
+            f" occurred:"
+        )
+
+    assert response1.id == response2.id
+    assert response1.created == response2.created
+    assert response1.choices[0].message.content == response2.choices[0].message.content
 
 
 @pytest.mark.skip(reason="AWS Suspended Account")
@@ -1263,7 +1420,7 @@ def test_get_cache_key():
                 "litellm_logging_obj": {},
             }
         )
-        cache_key_str = "model: gpt-3.5-turbomessages: [{'role': 'user', 'content': 'write a one sentence poem about: 7510'}]temperature: 0.2max_tokens: 40"
+        cache_key_str = "model: gpt-3.5-turbomessages: [{'role': 'user', 'content': 'write a one sentence poem about: 7510'}]max_tokens: 40temperature: 0.2stream: True"
         hash_object = hashlib.sha256(cache_key_str.encode())
         # Hexadecimal representation of the hash
         hash_hex = hash_object.hexdigest()
@@ -1493,3 +1650,55 @@ async def test_redis_semantic_cache_acompletion():
     )
     print(f"response2: {response2}")
     assert response1.id == response2.id
+
+
+def test_caching_redis_simple(caplog, capsys):
+    """
+    Relevant issue - https://github.com/BerriAI/litellm/issues/4511
+    """
+    litellm.set_verbose = True  ## REQUIRED FOR TEST.
+    litellm.cache = Cache(
+        type="redis", url=os.getenv("REDIS_SSL_URL")
+    )  # passing `supported_call_types = ["completion"]` has no effect
+
+    s = time.time()
+
+    uuid_str = str(uuid.uuid4())
+    x = completion(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": f"Hello, how are you? Wink {uuid_str}"}],
+        stream=True,
+    )
+    for m in x:
+        print(m)
+    print(time.time() - s)
+
+    s2 = time.time()
+    x = completion(
+        model="gpt-3.5-turbo",
+        messages=[{"role": "user", "content": f"Hello, how are you? Wink {uuid_str}"}],
+        stream=True,
+    )
+    for m in x:
+        print(m)
+    print(time.time() - s2)
+
+    redis_async_caching_error = False
+    redis_service_logging_error = False
+    captured = capsys.readouterr()
+    captured_logs = [rec.message for rec in caplog.records]
+
+    print(f"captured_logs: {captured_logs}")
+    for item in captured_logs:
+        if (
+            "Error connecting to Async Redis client" in item
+            or "Set ASYNC Redis Cache" in item
+        ):
+            redis_async_caching_error = True
+
+        if "ServiceLogging.async_service_success_hook" in item:
+            redis_service_logging_error = True
+
+    assert redis_async_caching_error is False
+    assert redis_service_logging_error is False
+    assert "async success_callback: reaches cache for logging" not in captured.out

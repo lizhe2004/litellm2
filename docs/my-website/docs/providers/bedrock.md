@@ -40,36 +40,36 @@ response = completion(
 
 Here's how to call Anthropic with the LiteLLM Proxy Server
 
-### 1. Save key in your environment
-
-```bash
-export AWS_ACCESS_KEY_ID=""
-export AWS_SECRET_ACCESS_KEY=""
-export AWS_REGION_NAME=""
-```
-
-### 2. Start the proxy 
-
-<Tabs>
-<TabItem value="cli" label="CLI">
-
-```bash
-$ litellm --model anthropic.claude-3-sonnet-20240229-v1:0
-
-# Server running on http://0.0.0.0:4000
-```
-</TabItem>
-<TabItem value="config" label="config.yaml">
+### 1. Setup config.yaml
 
 ```yaml
 model_list:
   - model_name: bedrock-claude-v1
     litellm_params:
       model: bedrock/anthropic.claude-instant-v1
+      aws_access_key_id: os.environ/CUSTOM_AWS_ACCESS_KEY_ID
+      aws_secret_access_key: os.environ/CUSTOM_AWS_SECRET_ACCESS_KEY
+      aws_region_name: os.environ/CUSTOM_AWS_REGION_NAME
 ```
-</TabItem>
-</Tabs>
 
+All possible auth params: 
+
+```
+aws_access_key_id: Optional[str],
+aws_secret_access_key: Optional[str],
+aws_session_token: Optional[str],
+aws_region_name: Optional[str],
+aws_session_name: Optional[str],
+aws_profile_name: Optional[str],
+aws_role_name: Optional[str],
+aws_web_identity_token: Optional[str],
+```
+
+### 2. Start the proxy 
+
+```bash
+litellm --config /path/to/config.yaml
+```
 ### 3. Test it
 
 
@@ -144,16 +144,135 @@ print(response)
 </TabItem>
 </Tabs>
 
+## Set temperature, top p, etc.
+
+<Tabs>
+<TabItem value="sdk" label="SDK">
+
+```python
+import os
+from litellm import completion
+
+os.environ["AWS_ACCESS_KEY_ID"] = ""
+os.environ["AWS_SECRET_ACCESS_KEY"] = ""
+os.environ["AWS_REGION_NAME"] = ""
+
+response = completion(
+  model="bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+  messages=[{ "content": "Hello, how are you?","role": "user"}],
+  temperature=0.7,
+  top_p=1
+)
+```
+</TabItem>
+<TabItem value="proxy" label="PROXY">
+
+**Set on yaml**
+
+```yaml
+model_list:
+  - model_name: bedrock-claude-v1
+    litellm_params:
+      model: bedrock/anthropic.claude-instant-v1
+      temperature: <your-temp>
+      top_p: <your-top-p>
+```
+
+**Set on request**
+
+```python
+
+import openai
+client = openai.OpenAI(
+    api_key="anything",
+    base_url="http://0.0.0.0:4000"
+)
+
+# request sent to model set on litellm proxy, `litellm --model`
+response = client.chat.completions.create(model="bedrock-claude-v1", messages = [
+    {
+        "role": "user",
+        "content": "this is a test request, write a short poem"
+    }
+],
+temperature=0.7,
+top_p=1
+)
+
+print(response)
+
+```
+
+</TabItem>
+</Tabs>
+
+## Pass provider-specific params 
+
+If you pass a non-openai param to litellm, we'll assume it's provider-specific and send it as a kwarg in the request body. [See more](../completion/input.md#provider-specific-params)
+
+<Tabs>
+<TabItem value="sdk" label="SDK">
+
+```python
+import os
+from litellm import completion
+
+os.environ["AWS_ACCESS_KEY_ID"] = ""
+os.environ["AWS_SECRET_ACCESS_KEY"] = ""
+os.environ["AWS_REGION_NAME"] = ""
+
+response = completion(
+  model="bedrock/anthropic.claude-3-sonnet-20240229-v1:0",
+  messages=[{ "content": "Hello, how are you?","role": "user"}],
+  top_k=1 # 👈 PROVIDER-SPECIFIC PARAM
+)
+```
+</TabItem>
+<TabItem value="proxy" label="PROXY">
+
+**Set on yaml**
+
+```yaml
+model_list:
+  - model_name: bedrock-claude-v1
+    litellm_params:
+      model: bedrock/anthropic.claude-instant-v1
+      top_k: 1 # 👈 PROVIDER-SPECIFIC PARAM
+```
+
+**Set on request**
+
+```python
+
+import openai
+client = openai.OpenAI(
+    api_key="anything",
+    base_url="http://0.0.0.0:4000"
+)
+
+# request sent to model set on litellm proxy, `litellm --model`
+response = client.chat.completions.create(model="bedrock-claude-v1", messages = [
+    {
+        "role": "user",
+        "content": "this is a test request, write a short poem"
+    }
+],
+temperature=0.7,
+extra_body={
+    top_k=1 # 👈 PROVIDER-SPECIFIC PARAM
+}
+)
+
+print(response)
+
+```
+
+</TabItem>
+</Tabs>
+
 ## Usage - Function Calling 
 
-:::info 
-
-Claude returns it's output as an XML Tree. [Here is how we translate it](https://github.com/BerriAI/litellm/blob/49642a5b00a53b1babc1a753426a8afcac85dbbe/litellm/llms/prompt_templates/factory.py#L734).
-
-You can see the raw response via `response._hidden_params["original_response"]`.
-
-Claude hallucinates, e.g. returning the list param `value` as `<value>\n<item>apple</item>\n<item>banana</item>\n</value>` or `<value>\n<list>\n<item>apple</item>\n<item>banana</item>\n</list>\n</value>`.
-:::
+LiteLLM uses Bedrock's Converse API for making tool calls
 
 ```python
 from litellm import completion
@@ -240,6 +359,71 @@ resp = litellm.completion(
 )
 print(f"\nResponse: {resp}")
 ```
+
+
+## Usage - Bedrock Guardrails
+
+Example of using [Bedrock Guardrails with LiteLLM](https://docs.aws.amazon.com/bedrock/latest/userguide/guardrails-use-converse-api.html)
+
+<Tabs>
+<TabItem value="sdk" label="LiteLLM SDK">
+
+```python
+from litellm import completion
+
+# set env
+os.environ["AWS_ACCESS_KEY_ID"] = ""
+os.environ["AWS_SECRET_ACCESS_KEY"] = ""
+os.environ["AWS_REGION_NAME"] = ""
+
+response = completion(
+    model="anthropic.claude-v2",
+    messages=[
+        {
+            "content": "where do i buy coffee from? ",
+            "role": "user",
+        }
+    ],
+    max_tokens=10,
+    guardrailConfig={
+        "guardrailIdentifier": "ff6ujrregl1q", # The identifier (ID) for the guardrail.
+        "guardrailVersion": "DRAFT",           # The version of the guardrail.
+        "trace": "disabled",                   # The trace behavior for the guardrail. Can either be "disabled" or "enabled"
+    },
+)
+```
+</TabItem>
+<TabItem value="proxy" label="LiteLLM Proxy Server">
+
+```python
+
+import openai
+client = openai.OpenAI(
+    api_key="anything",
+    base_url="http://0.0.0.0:4000"
+)
+
+# request sent to model set on litellm proxy, `litellm --model`
+response = client.chat.completions.create(model="anthropic.claude-v2", messages = [
+    {
+        "role": "user",
+        "content": "this is a test request, write a short poem"
+    }
+],
+temperature=0.7,
+extra_body={
+    "guardrailConfig": {
+        "guardrailIdentifier": "ff6ujrregl1q", # The identifier (ID) for the guardrail.
+        "guardrailVersion": "DRAFT",           # The version of the guardrail.
+        "trace": "disabled",                   # The trace behavior for the guardrail. Can either be "disabled" or "enabled"
+    },
+}
+)
+
+print(response)
+```
+</TabItem>
+</Tabs>
 
 ## Usage - "Assistant Pre-fill"
 
@@ -361,47 +545,6 @@ response = completion(
 )
 ```
 
-### Passing an external BedrockRuntime.Client as a parameter - Completion()
-Pass an external BedrockRuntime.Client object as a parameter to litellm.completion. Useful when using an AWS credentials profile, SSO session, assumed role session, or if environment variables are not available for auth.
-
-Create a client from session credentials:
-```python
-import boto3
-from litellm import completion
-
-bedrock = boto3.client(
-            service_name="bedrock-runtime",
-            region_name="us-east-1",
-            aws_access_key_id="",
-            aws_secret_access_key="",
-            aws_session_token="",
-)
-
-response = completion(
-            model="bedrock/anthropic.claude-instant-v1",
-            messages=[{ "content": "Hello, how are you?","role": "user"}],
-            aws_bedrock_client=bedrock,
-)
-```
-
-Create a client from AWS profile in `~/.aws/config`:
-```python
-import boto3
-from litellm import completion
-
-dev_session = boto3.Session(profile_name="dev-profile")
-bedrock = dev_session.client(
-            service_name="bedrock-runtime",
-            region_name="us-east-1",
-)
-
-response = completion(
-            model="bedrock/anthropic.claude-instant-v1",
-            messages=[{ "content": "Hello, how are you?","role": "user"}],
-            aws_bedrock_client=bedrock,
-)
-```
-
 ### SSO Login (AWS Profile)
 - Set `AWS_PROFILE` environment variable
 - Make bedrock completion call
@@ -464,6 +607,60 @@ response = completion(
         )
 ```
 
+
+### Passing an external BedrockRuntime.Client as a parameter - Completion()
+
+:::warning
+
+This is a deprecated flow. Boto3 is not async. And boto3.client does not let us make the http call through httpx. Pass in your aws params through the method above 👆. [See Auth Code](https://github.com/BerriAI/litellm/blob/55a20c7cce99a93d36a82bf3ae90ba3baf9a7f89/litellm/llms/bedrock_httpx.py#L284) [Add new auth flow](https://github.com/BerriAI/litellm/issues)
+
+
+Experimental - 2024-Jun-23:
+    `aws_access_key_id`, `aws_secret_access_key`, and `aws_session_token` will be extracted from boto3.client and be passed into the httpx client 
+
+:::
+
+Pass an external BedrockRuntime.Client object as a parameter to litellm.completion. Useful when using an AWS credentials profile, SSO session, assumed role session, or if environment variables are not available for auth.
+
+Create a client from session credentials:
+```python
+import boto3
+from litellm import completion
+
+bedrock = boto3.client(
+            service_name="bedrock-runtime",
+            region_name="us-east-1",
+            aws_access_key_id="",
+            aws_secret_access_key="",
+            aws_session_token="",
+)
+
+response = completion(
+            model="bedrock/anthropic.claude-instant-v1",
+            messages=[{ "content": "Hello, how are you?","role": "user"}],
+            aws_bedrock_client=bedrock,
+)
+```
+
+Create a client from AWS profile in `~/.aws/config`:
+```python
+import boto3
+from litellm import completion
+
+dev_session = boto3.Session(profile_name="dev-profile")
+bedrock = dev_session.client(
+            service_name="bedrock-runtime",
+            region_name="us-east-1",
+)
+
+response = completion(
+            model="bedrock/anthropic.claude-instant-v1",
+            messages=[{ "content": "Hello, how are you?","role": "user"}],
+            aws_bedrock_client=bedrock,
+)
+```
+
+
 ## Provisioned throughput models
 To use provisioned throughput Bedrock models pass 
 - `model=bedrock/<base-model>`, example `model=bedrock/anthropic.claude-v2`. Set `model` to any of the [Supported AWS models](#supported-aws-bedrock-models)
@@ -491,20 +688,25 @@ response = litellm.embedding(
 
 
 ## Supported AWS Bedrock Models
-Here's an example of using a bedrock model with LiteLLM
+Here's an example of using a bedrock model with LiteLLM. For a complete list, refer to the [model cost map](https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json)
 
 | Model Name                 | Command                                                          |
 |----------------------------|------------------------------------------------------------------|
-| Anthropic Claude-V3  sonnet    | `completion(model='bedrock/anthropic.claude-3-sonnet-20240229-v1:0', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-V3 Haiku     | `completion(model='bedrock/anthropic.claude-3-haiku-20240307-v1:0', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-V2.1      | `completion(model='bedrock/anthropic.claude-v2:1', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-V2        | `completion(model='bedrock/anthropic.claude-v2', messages=messages)`   | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
-| Anthropic Claude-Instant V1 | `completion(model='bedrock/anthropic.claude-instant-v1', messages=messages)` | `os.environ['ANTHROPIC_ACCESS_KEY_ID']`, `os.environ['ANTHROPIC_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V3.5 Sonnet    | `completion(model='bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V3  sonnet    | `completion(model='bedrock/anthropic.claude-3-sonnet-20240229-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V3 Haiku     | `completion(model='bedrock/anthropic.claude-3-haiku-20240307-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V3 Opus     | `completion(model='bedrock/anthropic.claude-3-opus-20240229-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V2.1      | `completion(model='bedrock/anthropic.claude-v2:1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-V2        | `completion(model='bedrock/anthropic.claude-v2', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Anthropic Claude-Instant V1 | `completion(model='bedrock/anthropic.claude-instant-v1', messages=messages)` | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Meta llama3-70b        | `completion(model='bedrock/meta.llama3-70b-instruct-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
+| Meta llama3-8b | `completion(model='bedrock/meta.llama3-8b-instruct-v1:0', messages=messages)` | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`           |
 | Amazon Titan Lite          | `completion(model='bedrock/amazon.titan-text-lite-v1', messages=messages)` | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | Amazon Titan Express       | `completion(model='bedrock/amazon.titan-text-express-v1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | Cohere Command             | `completion(model='bedrock/cohere.command-text-v14', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | AI21 J2-Mid                | `completion(model='bedrock/ai21.j2-mid-v1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | AI21 J2-Ultra              | `completion(model='bedrock/ai21.j2-ultra-v1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
+| AI21 Jamba-Instruct              | `completion(model='bedrock/ai21.jamba-instruct-v1:0', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | Meta Llama 2 Chat 13b      | `completion(model='bedrock/meta.llama2-13b-chat-v1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | Meta Llama 2 Chat 70b      | `completion(model='bedrock/meta.llama2-70b-chat-v1', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
 | Mistral 7B Instruct        | `completion(model='bedrock/mistral.mistral-7b-instruct-v0:2', messages=messages)`   | `os.environ['AWS_ACCESS_KEY_ID']`, `os.environ['AWS_SECRET_ACCESS_KEY']`, `os.environ['AWS_REGION_NAME']` |
@@ -535,7 +737,8 @@ print(response)
 
 | Model Name           | Function Call                               |
 |----------------------|---------------------------------------------|
-| Titan Embeddings - G1 | `embedding(model="bedrock/amazon.titan-embed-text-v1", input=input)` |
+| Titan Embeddings V2 | `embedding(model="bedrock/amazon.titan-embed-text-v2:0", input=input)` |
+| Titan Embeddings - V1 | `embedding(model="bedrock/amazon.titan-embed-text-v1", input=input)` |
 | Cohere Embeddings - English | `embedding(model="bedrock/cohere.embed-english-v3", input=input)` |
 | Cohere Embeddings - Multilingual | `embedding(model="bedrock/cohere.embed-multilingual-v3", input=input)` |
 

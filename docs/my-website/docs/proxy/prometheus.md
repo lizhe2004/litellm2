@@ -1,4 +1,16 @@
-# Grafana, Prometheus metrics [BETA]
+import Tabs from '@theme/Tabs';
+import TabItem from '@theme/TabItem';
+
+# 📈 [BETA] Prometheus metrics
+
+:::info
+🚨 Prometheus metrics will be out of Beta on September 15, 2024 - as part of this release it will be on LiteLLM Enterprise starting at $250/mo
+
+[Enterprise Pricing](https://www.litellm.ai/#pricing)
+
+[Contact us here to get a free trial](https://calendly.com/d/4mp-gd3-k5k/litellm-1-1-onboarding-chat)
+
+:::
 
 LiteLLM Exposes a `/metrics` endpoint for Prometheus to Poll
 
@@ -44,8 +56,10 @@ http://localhost:4000/metrics
 # <proxy_base_url>/metrics
 ```
 
-## Metrics Tracked 
+## 📈 Metrics Tracked 
 
+
+### Proxy Requests / Spend Metrics
 
 | Metric Name          | Description                          |
 |----------------------|--------------------------------------|
@@ -53,6 +67,31 @@ http://localhost:4000/metrics
 | `litellm_spend_metric`                | Total Spend, per `"user", "key", "model", "team", "end-user"`                 |
 | `litellm_total_tokens`         | input + output tokens per `"user", "key", "model", "team", "end-user"`     |
 | `litellm_llm_api_failed_requests_metric`   | Number of failed LLM API requests per `"user", "key", "model", "team", "end-user"`    |
+
+### LLM API / Provider Metrics
+
+| Metric Name          | Description                          |
+|----------------------|--------------------------------------|
+| `deployment_state`             | The state of the deployment: 0 = healthy, 1 = partial outage, 2 = complete outage. |
+| `litellm_remaining_requests_metric`             | Track `x-ratelimit-remaining-requests` returned from LLM API Deployment |
+| `litellm_remaining_tokens`                | Track `x-ratelimit-remaining-tokens` return from LLM API Deployment |
+ `llm_deployment_success_responses`              |  Total number of successful LLM API calls for deployment                               |
+| `llm_deployment_failure_responses`              | Total number of failed LLM API calls for deployment                                   |
+| `llm_deployment_total_requests`                 | Total number of LLM API calls for deployment - success + failure                      |
+| `llm_deployment_latency_per_output_token`       | Latency per output token for deployment                                                          |
+| `llm_deployment_successful_fallbacks`           |  Number of successful fallback requests from primary model -> fallback model        |
+| `llm_deployment_failed_fallbacks`               | Number of failed fallback requests from primary model -> fallback model            |
+
+
+
+
+### Budget Metrics
+| Metric Name          | Description                          |
+|----------------------|--------------------------------------|
+| `litellm_remaining_team_budget_metric`             | Remaining Budget for Team (A team created on LiteLLM) |
+| `litellm_remaining_api_key_budget_metric`                | Remaining Budget for API Key (A key Created on LiteLLM)|
+
+
 
 ## Monitor System Health
 
@@ -72,3 +111,9 @@ litellm_settings:
 | `litellm_redis_latency`         | histogram latency for redis calls     |
 | `litellm_redis_fails`         | Number of failed redis calls    |
 | `litellm_self_latency`         | Histogram latency for successful litellm api call    |
+
+## 🔥 Community Maintained Grafana Dashboards 
+
+Link to Grafana Dashboards made by LiteLLM community 
+
+https://github.com/BerriAI/litellm/tree/main/cookbook/litellm_proxy_server/grafana_dashboard

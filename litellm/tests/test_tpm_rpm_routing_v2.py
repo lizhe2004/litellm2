@@ -1,9 +1,14 @@
 #### What this tests ####
 #    This tests the router's ability to pick deployment with lowest tpm using 'usage-based-routing-v2-v2'
 
-import sys, os, asyncio, time, random
-from datetime import datetime
+import asyncio
+import os
+import random
+import sys
+import time
 import traceback
+from datetime import datetime
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -13,13 +18,14 @@ sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
 import pytest
-from litellm import Router
+
 import litellm
+from litellm import Router
+from litellm.caching import DualCache
 from litellm.router_strategy.lowest_tpm_rpm_v2 import (
     LowestTPMLoggingHandler_v2 as LowestTPMLoggingHandler,
 )
 from litellm.utils import get_utc_datetime
-from litellm.caching import DualCache
 
 ### UNIT TESTS FOR TPM/RPM ROUTING ###
 
@@ -282,10 +288,69 @@ def test_router_skip_rate_limited_deployments():
         print(f"An exception occurred! {str(e)}")
 
 
+@pytest.mark.parametrize("sync_mode", [True, False])
+@pytest.mark.asyncio
+async def test_multiple_potential_deployments(sync_mode):
+    """
+    If multiple deployments have the same tpm value
+
+    call 5 times, test if deployments are shuffled.
+
+    -> prevents single deployment from being overloaded in high-concurrency scenario
+    """
+
+    model_list = [
+        {
+            "model_name": "azure-model",
+            "litellm_params": {
+                "model": "azure/gpt-turbo",
+                "api_key": "os.environ/AZURE_FRANCE_API_KEY",
+                "api_base": "https://openai-france-1234.openai.azure.com",
+                "tpm": 1440,
+            },
+        },
+        {
+            "model_name": "azure-model",
+            "litellm_params": {
+                "model": "azure/gpt-turbo-2",
+                "api_key": "os.environ/AZURE_FRANCE_API_KEY",
+                "api_base": "https://openai-france-1234.openai.azure.com",
+                "tpm": 1440,
+            },
+        },
+    ]
+    router = Router(
+        model_list=model_list,
+        routing_strategy="usage-based-routing-v2",
+        set_verbose=False,
+        num_retries=3,
+    )  # type: ignore
+
+    model_ids = set()
+    for _ in range(1000):
+        if sync_mode:
+            deployment = router.get_available_deployment(
+                model="azure-model",
+                messages=[{"role": "user", "content": "Hey, how's it going?"}],
+            )
+        else:
+            deployment = await router.async_get_available_deployment(
+                model="azure-model",
+                messages=[{"role": "user", "content": "Hey, how's it going?"}],
+            )
+
+        ## get id ##
+        id = deployment.get("model_info", {}).get("id")
+        model_ids.add(id)
+
+    assert len(model_ids) == 2
+
+
 def test_single_deployment_tpm_zero():
-    import litellm
     import os
     from datetime import datetime
+
+    import litellm
 
     model_list = [
         {
@@ -329,7 +394,8 @@ async def test_router_completion_streaming():
                 "model": "azure/gpt-turbo",
                 "api_key": "os.environ/AZURE_FRANCE_API_KEY",
                 "api_base": "https://openai-france-1234.openai.azure.com",
-                "rpm": 1440,
+                "tpm": 1440,
+                "mock_response": "Hello world",
             },
             "model_info": {"id": 1},
         },
@@ -339,7 +405,8 @@ async def test_router_completion_streaming():
                 "model": "azure/gpt-35-turbo",
                 "api_key": "os.environ/AZURE_EUROPE_API_KEY",
                 "api_base": "https://my-endpoint-europe-berri-992.openai.azure.com",
-                "rpm": 6,
+                "tpm": 6,
+                "mock_response": "Hello world",
             },
             "model_info": {"id": 2},
         },

@@ -1,24 +1,36 @@
-import click
-import subprocess, traceback, json
-import os, sys
-import random
-from datetime import datetime
 import importlib
-from dotenv import load_dotenv
+import json
+import os
+import random
+import subprocess
+import sys
+import traceback
 import urllib.parse as urlparse
+from datetime import datetime
+
+import click
+from dotenv import load_dotenv
 
 sys.path.append(os.getcwd())
 
 config_filename = "litellm.secrets"
 
-load_dotenv()
-from importlib import resources
+litellm_mode = os.getenv("LITELLM_MODE", "DEV")  # "PRODUCTION", "DEV"
+if litellm_mode == "DEV":
+    load_dotenv()
 import shutil
+from enum import Enum
+from importlib import resources
 
 telemetry = None
 
 
-def append_query_params(url, params):
+class LiteLLMDatabaseConnectionPool(Enum):
+    database_connection_pool_limit = 10
+    database_connection_pool_timeout = 60
+
+
+def append_query_params(url, params) -> str:
     from litellm._logging import verbose_proxy_logger
 
     verbose_proxy_logger.debug(f"url: {url}")
@@ -38,7 +50,7 @@ def run_ollama_serve():
         with open(os.devnull, "w") as devnull:
             process = subprocess.Popen(command, stdout=devnull, stderr=devnull)
     except Exception as e:
-        print(
+        print(  # noqa
             f"""
             LiteLLM Warning: proxy started with `ollama` model\n`ollama serve` failed with Exception{e}. \nEnsure you run `ollama serve`
         """
@@ -66,7 +78,7 @@ def is_port_in_use(port):
 @click.option("--api_base", default=None, help="API base URL.")
 @click.option(
     "--api_version",
-    default="2023-07-01-preview",
+    default="2024-02-01",
     help="For azure - pass in the api version.",
 )
 @click.option(
@@ -166,6 +178,12 @@ def is_port_in_use(port):
     help="Calls async endpoints /queue/requests and /queue/response",
 )
 @click.option(
+    "--iam_token_db_auth",
+    default=False,
+    is_flag=True,
+    help="Connects to RDS DB with IAM token",
+)
+@click.option(
     "--num_requests",
     default=10,
     type=int,
@@ -216,6 +234,7 @@ def run_server(
     local,
     num_workers,
     test_async,
+    iam_token_db_auth,
     num_requests,
     use_queue,
     health,
@@ -226,13 +245,29 @@ def run_server(
 ):
     args = locals()
     if local:
-        from proxy_server import app, save_worker_config, ProxyConfig
+        from proxy_server import (
+            KeyManagementSettings,
+            KeyManagementSystem,
+            ProxyConfig,
+            app,
+            load_aws_kms,
+            load_aws_secret_manager,
+            load_from_azure_key_vault,
+            load_google_kms,
+            save_worker_config,
+        )
     else:
         try:
             from .proxy_server import (
-                app,
-                save_worker_config,
+                KeyManagementSettings,
+                KeyManagementSystem,
                 ProxyConfig,
+                app,
+                load_aws_kms,
+                load_aws_secret_manager,
+                load_from_azure_key_vault,
+                load_google_kms,
+                save_worker_config,
             )
         except ImportError as e:
             if "litellm[proxy]" in str(e):
@@ -241,9 +276,15 @@ def run_server(
             else:
                 # this is just a local/relative import error, user git cloned litellm
                 from proxy_server import (
-                    app,
-                    save_worker_config,
+                    KeyManagementSettings,
+                    KeyManagementSystem,
                     ProxyConfig,
+                    app,
+                    load_aws_kms,
+                    load_aws_secret_manager,
+                    load_from_azure_key_vault,
+                    load_google_kms,
+                    save_worker_config,
                 )
     if version == True:
         pkg_version = importlib.metadata.version("litellm")
@@ -252,7 +293,10 @@ def run_server(
     if model and "ollama" in model and api_base is None:
         run_ollama_serve()
     if test_async is True:
-        import requests, concurrent, time
+        import concurrent
+        import time
+
+        import requests  # type: ignore
 
         api_base = f"http://{host}:{port}"
 
@@ -274,17 +318,17 @@ def run_server(
                     polling_url = f"{api_base}{url}"
                     polling_response = requests.get(polling_url)
                     polling_response = polling_response.json()
-                    print("\n RESPONSE FROM POLLING JOB", polling_response)
+                    print("\n RESPONSE FROM POLLING JOB", polling_response)  # noqa
                     status = polling_response["status"]
                     if status == "finished":
                         llm_response = polling_response["result"]
                         break
-                    print(
-                        f"POLLING JOB{polling_url}\nSTATUS: {status}, \n Response {polling_response}"
+                    print(  # noqa
+                        f"POLLING JOB{polling_url}\nSTATUS: {status}, \n Response {polling_response}"  # noqa
                     )  # noqa
                     time.sleep(0.5)
                 except Exception as e:
-                    print("got exception in polling", e)
+                    print("got exception in polling", e)  # noqa
                     break
 
         # Number of concurrent calls (you can adjust this)
@@ -314,18 +358,18 @@ def run_server(
                 else:
                     failed_calls += 1
         end_time = time.time()
-        print(f"Elapsed Time: {end_time-start_time}")
-        print(f"Load test Summary:")
-        print(f"Total Requests: {concurrent_calls}")
-        print(f"Successful Calls: {successful_calls}")
-        print(f"Failed Calls: {failed_calls}")
+        print(f"Elapsed Time: {end_time-start_time}")  # noqa
+        print(f"Load test Summary:")  # noqa
+        print(f"Total Requests: {concurrent_calls}")  # noqa
+        print(f"Successful Calls: {successful_calls}")  # noqa
+        print(f"Failed Calls: {failed_calls}")  # noqa
         return
     if health != False:
         import requests
 
-        print("\nLiteLLM: Health Testing models in config")
+        print("\nLiteLLM: Health Testing models in config")  # noqa
         response = requests.get(url=f"http://{host}:{port}/health")
-        print(json.dumps(response.json(), indent=4))
+        print(json.dumps(response.json(), indent=4))  # noqa
         return
     if test != False:
         request_model = model or "gpt-3.5-turbo"
@@ -352,8 +396,8 @@ def run_server(
         )
         click.echo(f"\nLiteLLM: response from proxy {response}")
 
-        print(
-            f"\n LiteLLM: Making a test ChatCompletions + streaming request to proxy. Model={request_model}"
+        print(  # noqa
+            f"\n LiteLLM: Making a test ChatCompletions + streaming r equest to proxy. Model={request_model}"
         )
 
         response = client.chat.completions.create(
@@ -368,11 +412,11 @@ def run_server(
         )
         for chunk in response:
             click.echo(f"LiteLLM: streaming response from proxy {chunk}")
-        print("\n making completion request to proxy")
+        print("\n making completion request to proxy")  # noqa
         response = client.completions.create(
             model=request_model, prompt="this is a test request, write a short poem"
         )
-        print(response)
+        print(response)  # noqa
 
         return
     else:
@@ -411,6 +455,38 @@ def run_server(
 
         db_connection_pool_limit = 100
         db_connection_timeout = 60
+        ### GET DB TOKEN FOR IAM AUTH ###
+
+        if iam_token_db_auth:
+            from litellm.proxy.auth.rds_iam_token import generate_iam_auth_token
+
+            db_host = os.getenv("DATABASE_HOST")
+            db_port = os.getenv("DATABASE_PORT")
+            db_user = os.getenv("DATABASE_USER")
+            db_name = os.getenv("DATABASE_NAME")
+
+            token = generate_iam_auth_token(
+                db_host=db_host, db_port=db_port, db_user=db_user
+            )
+
+            # print(f"token: {token}")
+            _db_url = f"postgresql://{db_user}:{token}@{db_host}:{db_port}/{db_name}"
+            os.environ["DATABASE_URL"] = _db_url
+
+        ### DECRYPT ENV VAR ###
+
+        from litellm.proxy.secret_managers.aws_secret_manager import decrypt_env_var
+
+        if (
+            os.getenv("USE_AWS_KMS", None) is not None
+            and os.getenv("USE_AWS_KMS") == "True"
+        ):
+            ## V2 IMPLEMENTATION OF AWS KMS - USER WANTS TO DECRYPT MULTIPLE KEYS IN THEIR ENV
+            new_env_var = decrypt_env_var()
+
+            for k, v in new_env_var.items():
+                os.environ[k] = v
+
         if config is not None:
             """
             Allow user to pass in db url via config
@@ -418,7 +494,9 @@ def run_server(
             read from there and save it to os.env['DATABASE_URL']
             """
             try:
-                import yaml, asyncio
+                import asyncio
+
+                import yaml  # type: ignore
             except:
                 raise ImportError(
                     "yaml needs to be imported. Run - `pip install 'litellm[proxy]'`"
@@ -426,15 +504,65 @@ def run_server(
 
             proxy_config = ProxyConfig()
             _config = asyncio.run(proxy_config.get_config(config_file_path=config))
+
+            ### LITELLM SETTINGS ###
+            litellm_settings = _config.get("litellm_settings", None)
+            if (
+                litellm_settings is not None
+                and "json_logs" in litellm_settings
+                and litellm_settings["json_logs"] == True
+            ):
+                import litellm
+
+                litellm.json_logs = True
+
+                litellm._turn_on_json()
+            ### GENERAL SETTINGS ###
             general_settings = _config.get("general_settings", {})
             if general_settings is None:
                 general_settings = {}
+            if general_settings:
+                ### LOAD SECRET MANAGER ###
+                key_management_system = general_settings.get(
+                    "key_management_system", None
+                )
+                if key_management_system is not None:
+                    if (
+                        key_management_system
+                        == KeyManagementSystem.AZURE_KEY_VAULT.value
+                    ):
+                        ### LOAD FROM AZURE KEY VAULT ###
+                        load_from_azure_key_vault(use_azure_key_vault=True)
+                    elif key_management_system == KeyManagementSystem.GOOGLE_KMS.value:
+                        ### LOAD FROM GOOGLE KMS ###
+                        load_google_kms(use_google_kms=True)
+                    elif (
+                        key_management_system
+                        == KeyManagementSystem.AWS_SECRET_MANAGER.value  # noqa: F405
+                    ):
+                        ### LOAD FROM AWS SECRET MANAGER ###
+                        load_aws_secret_manager(use_aws_secret_manager=True)
+                    elif key_management_system == KeyManagementSystem.AWS_KMS.value:
+                        load_aws_kms(use_aws_kms=True)
+                    else:
+                        raise ValueError("Invalid Key Management System selected")
+            key_management_settings = general_settings.get(
+                "key_management_settings", None
+            )
+            if key_management_settings is not None:
+                import litellm
+
+                litellm._key_management_settings = KeyManagementSettings(
+                    **key_management_settings
+                )
             database_url = general_settings.get("database_url", None)
             db_connection_pool_limit = general_settings.get(
-                "database_connection_pool_limit", 100
+                "database_connection_pool_limit",
+                LiteLLMDatabaseConnectionPool.database_connection_pool_limit.value,
             )
             db_connection_timeout = general_settings.get(
-                "database_connection_timeout", 60
+                "database_connection_timeout",
+                LiteLLMDatabaseConnectionPool.database_connection_pool_timeout.value,
             )
             if database_url and database_url.startswith("os.environ/"):
                 original_dir = os.getcwd()
@@ -444,7 +572,7 @@ def run_server(
                 )  # Adds the parent directory to the system path - for litellm local dev
                 import litellm
 
-                database_url = litellm.get_secret(database_url)
+                database_url = litellm.get_secret(database_url, default_value=None)
                 os.chdir(original_dir)
             if database_url is not None and isinstance(database_url, str):
                 os.environ["DATABASE_URL"] = database_url
@@ -454,13 +582,15 @@ def run_server(
             or os.getenv("DIRECT_URL", None) is not None
         ):
             try:
+                from litellm import get_secret
+
                 if os.getenv("DATABASE_URL", None) is not None:
                     ### add connection pool + pool timeout args
                     params = {
                         "connection_limit": db_connection_pool_limit,
                         "pool_timeout": db_connection_timeout,
                     }
-                    database_url = os.getenv("DATABASE_URL")
+                    database_url = get_secret("DATABASE_URL", default_value=None)
                     modified_url = append_query_params(database_url, params)
                     os.environ["DATABASE_URL"] = modified_url
                 if os.getenv("DIRECT_URL", None) is not None:
@@ -491,23 +621,24 @@ def run_server(
                         subprocess.run(["prisma", "db", "push", "--accept-data-loss"])
                         break  # Exit the loop if the subprocess succeeds
                     except subprocess.CalledProcessError as e:
-                        print(f"Error: {e}")
+                        print(f"Error: {e}")  # noqa
                         time.sleep(random.randrange(start=1, stop=5))
                     finally:
                         os.chdir(original_dir)
             else:
-                print(
-                    f"Unable to connect to DB. DATABASE_URL found in environment, but prisma package not found."
+                print(  # noqa
+                    f"Unable to connect to DB. DATABASE_URL found in environment, but prisma package not found."  # noqa
                 )
         if port == 4000 and is_port_in_use(port):
             port = random.randint(1024, 49152)
 
+        import litellm
         from litellm.proxy.proxy_server import app
 
         if run_gunicorn == False:
             if ssl_certfile_path is not None and ssl_keyfile_path is not None:
-                print(
-                    f"\033[1;32mLiteLLM Proxy: Using SSL with certfile: {ssl_certfile_path} and keyfile: {ssl_keyfile_path}\033[0m\n"
+                print(  # noqa
+                    f"\033[1;32mLiteLLM Proxy: Using SSL with certfile: {ssl_certfile_path} and keyfile: {ssl_keyfile_path}\033[0m\n"  # noqa
                 )
                 uvicorn.run(
                     app,
@@ -517,7 +648,12 @@ def run_server(
                     ssl_certfile=ssl_certfile_path,
                 )  # run uvicorn
             else:
-                uvicorn.run(app, host=host, port=port)  # run uvicorn
+                if litellm.json_logs:
+                    uvicorn.run(
+                        app, host=host, port=port, log_config=None
+                    )  # run uvicorn w/ json
+                else:
+                    uvicorn.run(app, host=host, port=port)  # run uvicorn
         elif run_gunicorn == True:
             import gunicorn.app.base
 
@@ -554,7 +690,7 @@ def run_server(
                     print(  # noqa
                         f"\033[1;34mLiteLLM: Curl Command Test for your local proxy\n {curl_command} \033[0m\n"
                     )
-                    print(
+                    print(  # noqa
                         "\033[1;34mDocs: https://docs.litellm.ai/docs/simple_proxy\033[0m\n"
                     )  # noqa
                     print(  # noqa
@@ -575,8 +711,8 @@ def run_server(
                     # gunicorn app function
                     return self.application
 
-            print(
-                f"\033[1;32mLiteLLM Proxy: Starting server on {host}:{port} with {num_workers} workers\033[0m\n"
+            print(  # noqa
+                f"\033[1;32mLiteLLM Proxy: Starting server on {host}:{port} with {num_workers} workers\033[0m\n"  # noqa
             )
             gunicorn_options = {
                 "bind": f"{host}:{port}",
@@ -589,8 +725,8 @@ def run_server(
             }
 
             if ssl_certfile_path is not None and ssl_keyfile_path is not None:
-                print(
-                    f"\033[1;32mLiteLLM Proxy: Using SSL with certfile: {ssl_certfile_path} and keyfile: {ssl_keyfile_path}\033[0m\n"
+                print(  # noqa
+                    f"\033[1;32mLiteLLM Proxy: Using SSL with certfile: {ssl_certfile_path} and keyfile: {ssl_keyfile_path}\033[0m\n"  # noqa
                 )
                 gunicorn_options["certfile"] = ssl_certfile_path
                 gunicorn_options["keyfile"] = ssl_keyfile_path

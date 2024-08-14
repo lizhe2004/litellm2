@@ -1,15 +1,19 @@
-import os, types
 import json
-from enum import Enum
-import requests
+import os
 import time
+import types
+from enum import Enum
 from typing import Callable, Optional
-from litellm.utils import ModelResponse, Usage, CustomStreamWrapper
-import litellm
-from .prompt_templates.factory import prompt_factory, custom_prompt
+
 import httpx
-from .base import BaseLLM
+import requests
+
+import litellm
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+from litellm.utils import CustomStreamWrapper, ModelResponse, Usage
+
+from .base import BaseLLM
+from .prompt_templates.factory import custom_prompt, prompt_factory
 
 
 class AnthropicConstants(Enum):
@@ -100,7 +104,7 @@ class AnthropicTextCompletion(BaseLLM):
     def __init__(self) -> None:
         super().__init__()
 
-    def process_response(
+    def _process_response(
         self, model_response: ModelResponse, response, encoding, prompt: str, model: str
     ):
         ## RESPONSE OBJECT
@@ -117,9 +121,9 @@ class AnthropicTextCompletion(BaseLLM):
             )
         else:
             if len(completion_response["completion"]) > 0:
-                model_response["choices"][0]["message"]["content"] = (
-                    completion_response["completion"]
-                )
+                model_response.choices[0].message.content = completion_response[  # type: ignore
+                    "completion"
+                ]
             model_response.choices[0].finish_reason = completion_response["stop_reason"]
 
         ## CALCULATING USAGE
@@ -130,14 +134,15 @@ class AnthropicTextCompletion(BaseLLM):
             encoding.encode(model_response["choices"][0]["message"].get("content", ""))
         )  ##[TODO] use the anthropic tokenizer here
 
-        model_response["created"] = int(time.time())
-        model_response["model"] = model
+        model_response.created = int(time.time())
+        model_response.model = model
         usage = Usage(
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             total_tokens=prompt_tokens + completion_tokens,
         )
-        model_response.usage = usage
+
+        setattr(model_response, "usage", usage)
 
         return model_response
 
@@ -170,7 +175,7 @@ class AnthropicTextCompletion(BaseLLM):
             additional_args={"complete_input_dict": data},
         )
 
-        response = self.process_response(
+        response = self._process_response(
             model_response=model_response,
             response=response,
             encoding=encoding,
@@ -329,7 +334,7 @@ class AnthropicTextCompletion(BaseLLM):
             )
             print_verbose(f"raw model_response: {response.text}")
 
-            response = self.process_response(
+            response = self._process_response(
                 model_response=model_response,
                 response=response,
                 encoding=encoding,

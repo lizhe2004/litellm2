@@ -1,15 +1,18 @@
-import uuid, enum
-from pydantic import BaseModel, Field
+import enum
+import uuid
 from typing import Optional
 
+from pydantic import BaseModel, Field
 
-class ServiceTypes(enum.Enum):
+
+class ServiceTypes(str, enum.Enum):
     """
     Enum for litellm + litellm-adjacent services (redis/postgres/etc.)
     """
 
     REDIS = "redis"
     DB = "postgres"
+    BATCH_WRITE_TO_DB = "batch_write_to_db"
     LITELLM = "self"
 
 

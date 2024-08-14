@@ -1,8 +1,12 @@
 #### What this tests ####
 #    This tests calling router with fallback models
 
-import sys, os, time
-import traceback, asyncio
+import asyncio
+import os
+import sys
+import time
+import traceback
+
 import pytest
 
 sys.path.insert(
@@ -22,10 +26,10 @@ class MyCustomHandler(CustomLogger):
     def log_pre_api_call(self, model, messages, kwargs):
         print(f"Pre-API Call")
         print(
-            f"previous_models: {kwargs['litellm_params']['metadata']['previous_models']}"
+            f"previous_models: {kwargs['litellm_params']['metadata'].get('previous_models', None)}"
         )
-        self.previous_models += len(
-            kwargs["litellm_params"]["metadata"]["previous_models"]
+        self.previous_models = len(
+            kwargs["litellm_params"]["metadata"].get("previous_models", [])
         )  # {"previous_models": [{"model": litellm_model_name, "exception_type": AuthenticationError, "exception_string": <complete_traceback>}]}
         print(f"self.previous_models: {self.previous_models}")
 
@@ -127,7 +131,7 @@ def test_sync_fallbacks():
         response = router.completion(**kwargs)
         print(f"response: {response}")
         time.sleep(0.05)  # allow a delay as success_callbacks are on a separate thread
-        assert customHandler.previous_models == 1  # 0 retries, 1 fallback
+        assert customHandler.previous_models == 4
 
         print("Passed ! Test router_fallbacks: test_sync_fallbacks()")
         router.reset()
@@ -140,7 +144,7 @@ def test_sync_fallbacks():
 
 @pytest.mark.asyncio
 async def test_async_fallbacks():
-    litellm.set_verbose = False
+    litellm.set_verbose = True
     model_list = [
         {  # list of model deployments
             "model_name": "azure/gpt-3.5-turbo",  # openai model name
@@ -209,12 +213,13 @@ async def test_async_fallbacks():
     user_message = "Hello, how are you?"
     messages = [{"content": user_message, "role": "user"}]
     try:
+        kwargs["model"] = "azure/gpt-3.5-turbo"
         response = await router.acompletion(**kwargs)
         print(f"customHandler.previous_models: {customHandler.previous_models}")
         await asyncio.sleep(
             0.05
         )  # allow a delay as success_callbacks are on a separate thread
-        assert customHandler.previous_models == 1  # 0 retries, 1 fallback
+        assert customHandler.previous_models == 4  # 1 init call, 2 retries, 1 fallback
         router.reset()
     except litellm.Timeout as e:
         pass
@@ -268,7 +273,7 @@ def test_sync_fallbacks_embeddings():
         response = router.embedding(**kwargs)
         print(f"customHandler.previous_models: {customHandler.previous_models}")
         time.sleep(0.05)  # allow a delay as success_callbacks are on a separate thread
-        assert customHandler.previous_models == 1  # 0 retries, 1 fallback
+        assert customHandler.previous_models == 1  # 1 init call, 2 retries, 1 fallback
         router.reset()
     except litellm.Timeout as e:
         pass
@@ -322,7 +327,7 @@ async def test_async_fallbacks_embeddings():
         await asyncio.sleep(
             0.05
         )  # allow a delay as success_callbacks are on a separate thread
-        assert customHandler.previous_models == 1  # 0 retries, 1 fallback
+        assert customHandler.previous_models == 1  # 1 init call with a bad key
         router.reset()
     except litellm.Timeout as e:
         pass
@@ -401,7 +406,7 @@ def test_dynamic_fallbacks_sync():
         response = router.completion(**kwargs)
         print(f"response: {response}")
         time.sleep(0.05)  # allow a delay as success_callbacks are on a separate thread
-        assert customHandler.previous_models == 1  # 0 retries, 1 fallback
+        assert customHandler.previous_models == 4  # 1 init call, 2 retries, 1 fallback
         router.reset()
     except Exception as e:
         pytest.fail(f"An exception occurred - {e}")
@@ -487,7 +492,7 @@ async def test_dynamic_fallbacks_async():
         await asyncio.sleep(
             0.05
         )  # allow a delay as success_callbacks are on a separate thread
-        assert customHandler.previous_models == 1  # 0 retries, 1 fallback
+        assert customHandler.previous_models == 4  # 1 init call, 2 retries, 1 fallback
         router.reset()
     except Exception as e:
         pytest.fail(f"An exception occurred - {e}")
@@ -572,7 +577,7 @@ async def test_async_fallbacks_streaming():
         await asyncio.sleep(
             0.05
         )  # allow a delay as success_callbacks are on a separate thread
-        assert customHandler.previous_models == 1  # 0 retries, 1 fallback
+        assert customHandler.previous_models == 4  # 1 init call, 2 retries, 1 fallback
         router.reset()
     except litellm.Timeout as e:
         pass
@@ -751,24 +756,29 @@ async def test_async_fallbacks_max_retries_per_request():
         router.reset()
 
 
-def test_usage_based_routing_fallbacks():
+def test_ausage_based_routing_fallbacks():
     try:
+        import litellm
+
+        litellm.set_verbose = False
         # [Prod Test]
         # IT tests Usage Based Routing with fallbacks
         # The Request should fail azure/gpt-4-fast. Then fallback -> "azure/gpt-4-basic" -> "openai-gpt-4"
         # It should work with "openai-gpt-4"
         import os
+
+        from dotenv import load_dotenv
+
         import litellm
         from litellm import Router
-        from dotenv import load_dotenv
 
         load_dotenv()
 
         # Constants for TPM and RPM allocation
-        AZURE_FAST_TPM = 3
-        AZURE_BASIC_TPM = 4
-        OPENAI_TPM = 400
-        ANTHROPIC_TPM = 100000
+        AZURE_FAST_RPM = 1
+        AZURE_BASIC_RPM = 1
+        OPENAI_RPM = 0
+        ANTHROPIC_RPM = 10
 
         def get_azure_params(deployment_name: str):
             params = {
@@ -797,22 +807,26 @@ def test_usage_based_routing_fallbacks():
             {
                 "model_name": "azure/gpt-4-fast",
                 "litellm_params": get_azure_params("chatgpt-v-2"),
-                "tpm": AZURE_FAST_TPM,
+                "model_info": {"id": 1},
+                "rpm": AZURE_FAST_RPM,
             },
             {
                 "model_name": "azure/gpt-4-basic",
                 "litellm_params": get_azure_params("chatgpt-v-2"),
-                "tpm": AZURE_BASIC_TPM,
+                "model_info": {"id": 2},
+                "rpm": AZURE_BASIC_RPM,
             },
             {
                 "model_name": "openai-gpt-4",
                 "litellm_params": get_openai_params("gpt-3.5-turbo"),
-                "tpm": OPENAI_TPM,
+                "model_info": {"id": 3},
+                "rpm": OPENAI_RPM,
             },
             {
                 "model_name": "anthropic-claude-instant-1.2",
                 "litellm_params": get_anthropic_params("claude-instant-1.2"),
-                "tpm": ANTHROPIC_TPM,
+                "model_info": {"id": 4},
+                "rpm": ANTHROPIC_RPM,
             },
         ]
         # litellm.set_verbose=True
@@ -827,9 +841,10 @@ def test_usage_based_routing_fallbacks():
             fallbacks=fallbacks_list,
             set_verbose=True,
             debug_level="DEBUG",
-            routing_strategy="usage-based-routing",
+            routing_strategy="usage-based-routing-v2",
             redis_host=os.environ["REDIS_HOST"],
-            redis_port=os.environ["REDIS_PORT"],
+            redis_port=int(os.environ["REDIS_PORT"]),
+            num_retries=0,
         )
 
         messages = [
@@ -842,13 +857,13 @@ def test_usage_based_routing_fallbacks():
             mock_response="very nice to meet you",
         )
         print("response: ", response)
-        print("response._hidden_params: ", response._hidden_params)
+        print(f"response._hidden_params: {response._hidden_params}")
         # in this test, we expect azure/gpt-4 fast to fail, then azure-gpt-4 basic to fail and then openai-gpt-4 to pass
         # the token count of this message is > AZURE_FAST_TPM, > AZURE_BASIC_TPM
-        assert response._hidden_params["custom_llm_provider"] == "openai"
+        assert response._hidden_params["model_id"] == "1"
 
-        # now make 100 mock requests to OpenAI - expect it to fallback to anthropic-claude-instant-1.2
-        for i in range(20):
+        for i in range(10):
+            # now make 100 mock requests to OpenAI - expect it to fallback to anthropic-claude-instant-1.2
             response = router.completion(
                 model="azure/gpt-4-fast",
                 messages=messages,
@@ -857,9 +872,8 @@ def test_usage_based_routing_fallbacks():
             )
             print("response: ", response)
             print("response._hidden_params: ", response._hidden_params)
-            if i == 19:
-                # by the 19th call we should have hit TPM LIMIT for OpenAI, it should fallback to anthropic-claude-instant-1.2
-                assert response._hidden_params["custom_llm_provider"] == "anthropic"
+            if i == 9:
+                assert response._hidden_params["model_id"] == "4"
 
     except Exception as e:
         pytest.fail(f"An exception occurred {e}")
@@ -953,3 +967,221 @@ def test_custom_cooldown_times():
 
     except Exception as e:
         print(e)
+
+
+@pytest.mark.parametrize("sync_mode", [True, False])
+@pytest.mark.asyncio
+async def test_service_unavailable_fallbacks(sync_mode):
+    """
+    Initial model - openai
+    Fallback - azure
+
+    Error - 503, service unavailable
+    """
+    router = Router(
+        model_list=[
+            {
+                "model_name": "gpt-3.5-turbo-012",
+                "litellm_params": {
+                    "model": "gpt-3.5-turbo",
+                    "api_key": "anything",
+                    "api_base": "http://0.0.0.0:8080",
+                },
+            },
+            {
+                "model_name": "gpt-3.5-turbo-0125-preview",
+                "litellm_params": {
+                    "model": "azure/chatgpt-v-2",
+                    "api_key": os.getenv("AZURE_API_KEY"),
+                    "api_version": os.getenv("AZURE_API_VERSION"),
+                    "api_base": os.getenv("AZURE_API_BASE"),
+                },
+            },
+        ],
+        fallbacks=[{"gpt-3.5-turbo-012": ["gpt-3.5-turbo-0125-preview"]}],
+    )
+
+    if sync_mode:
+        response = router.completion(
+            model="gpt-3.5-turbo-012",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+        )
+    else:
+        response = await router.acompletion(
+            model="gpt-3.5-turbo-012",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+        )
+
+    assert response.model == "gpt-35-turbo"
+
+
+@pytest.mark.parametrize("sync_mode", [True, False])
+@pytest.mark.parametrize("litellm_module_fallbacks", [True, False])
+@pytest.mark.asyncio
+async def test_default_model_fallbacks(sync_mode, litellm_module_fallbacks):
+    """
+    Related issue - https://github.com/BerriAI/litellm/issues/3623
+
+    If model misconfigured, setup a default model for generic fallback
+    """
+    if litellm_module_fallbacks:
+        litellm.default_fallbacks = ["my-good-model"]
+    router = Router(
+        model_list=[
+            {
+                "model_name": "bad-model",
+                "litellm_params": {
+                    "model": "openai/my-bad-model",
+                    "api_key": "my-bad-api-key",
+                },
+            },
+            {
+                "model_name": "my-good-model",
+                "litellm_params": {
+                    "model": "gpt-4o",
+                    "api_key": os.getenv("OPENAI_API_KEY"),
+                },
+            },
+        ],
+        default_fallbacks=(
+            ["my-good-model"] if litellm_module_fallbacks == False else None
+        ),
+    )
+
+    if sync_mode:
+        response = router.completion(
+            model="bad-model",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+            mock_testing_fallbacks=True,
+            mock_response="Hey! nice day",
+        )
+    else:
+        response = await router.acompletion(
+            model="bad-model",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+            mock_testing_fallbacks=True,
+            mock_response="Hey! nice day",
+        )
+
+    assert isinstance(response, litellm.ModelResponse)
+    assert response.model is not None and response.model == "gpt-4o"
+
+
+@pytest.mark.parametrize("sync_mode", [True, False])
+@pytest.mark.asyncio
+async def test_client_side_fallbacks_list(sync_mode):
+    """
+
+    Tests Client Side Fallbacks
+
+    User can pass "fallbacks": ["gpt-3.5-turbo"] and this should work
+
+    """
+    router = Router(
+        model_list=[
+            {
+                "model_name": "bad-model",
+                "litellm_params": {
+                    "model": "openai/my-bad-model",
+                    "api_key": "my-bad-api-key",
+                },
+            },
+            {
+                "model_name": "my-good-model",
+                "litellm_params": {
+                    "model": "gpt-4o",
+                    "api_key": os.getenv("OPENAI_API_KEY"),
+                },
+            },
+        ],
+    )
+
+    if sync_mode:
+        response = router.completion(
+            model="bad-model",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+            fallbacks=["my-good-model"],
+            mock_testing_fallbacks=True,
+            mock_response="Hey! nice day",
+        )
+    else:
+        response = await router.acompletion(
+            model="bad-model",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+            fallbacks=["my-good-model"],
+            mock_testing_fallbacks=True,
+            mock_response="Hey! nice day",
+        )
+
+    assert isinstance(response, litellm.ModelResponse)
+    assert response.model is not None and response.model == "gpt-4o"
+
+
+@pytest.mark.parametrize("sync_mode", [True, False])
+@pytest.mark.parametrize("content_filter_response_exception", [True, False])
+@pytest.mark.asyncio
+async def test_router_content_policy_fallbacks(
+    sync_mode, content_filter_response_exception
+):
+    os.environ["LITELLM_LOG"] = "DEBUG"
+
+    if content_filter_response_exception:
+        mock_response = Exception("content filtering policy")
+    else:
+        mock_response = litellm.ModelResponse(
+            choices=[litellm.Choices(finish_reason="content_filter")],
+            model="gpt-3.5-turbo",
+            usage=litellm.Usage(prompt_tokens=10, completion_tokens=0, total_tokens=10),
+        )
+    router = Router(
+        model_list=[
+            {
+                "model_name": "claude-2",
+                "litellm_params": {
+                    "model": "claude-2",
+                    "api_key": "",
+                    "mock_response": mock_response,
+                },
+            },
+            {
+                "model_name": "my-fallback-model",
+                "litellm_params": {
+                    "model": "openai/my-fake-model",
+                    "api_key": "",
+                    "mock_response": "This works!",
+                },
+            },
+            {
+                "model_name": "my-general-model",
+                "litellm_params": {
+                    "model": "claude-2",
+                    "api_key": "",
+                    "mock_response": Exception("Should not have called this."),
+                },
+            },
+            {
+                "model_name": "my-context-window-model",
+                "litellm_params": {
+                    "model": "claude-2",
+                    "api_key": "",
+                    "mock_response": Exception("Should not have called this."),
+                },
+            },
+        ],
+        content_policy_fallbacks=[{"claude-2": ["my-fallback-model"]}],
+        fallbacks=[{"claude-2": ["my-general-model"]}],
+        context_window_fallbacks=[{"claude-2": ["my-context-window-model"]}],
+    )
+
+    if sync_mode is True:
+        response = router.completion(
+            model="claude-2",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+        )
+    else:
+        response = await router.acompletion(
+            model="claude-2",
+            messages=[{"role": "user", "content": "Hey, how's it going?"}],
+        )
+
+    assert response.model == "my-fake-model"

@@ -1,16 +1,25 @@
 "use client";
 import React, { useState, useEffect } from "react";
-import { userInfoCall, modelAvailableCall, getTotalSpendCall } from "./networking";
+import {
+  userInfoCall,
+  modelAvailableCall,
+  getTotalSpendCall,
+  getProxyBaseUrlAndLogoutUrl,
+} from "./networking";
 import { Grid, Col, Card, Text, Title } from "@tremor/react";
 import CreateKey from "./create_key_button";
 import ViewKeyTable from "./view_key_table";
 import ViewUserSpend from "./view_user_spend";
 import ViewUserTeam from "./view_user_team";
 import DashboardTeam from "./dashboard_default_team";
+import Onboarding from "../app/onboarding/page";
 import { useSearchParams, useRouter } from "next/navigation";
 import { jwtDecode } from "jwt-decode";
 import { Typography } from "antd";
 const isLocal = process.env.NODE_ENV === "development";
+if (isLocal != true) {
+  console.log = function() {};
+}
 console.log("isLocal:", isLocal);
 const proxyBaseUrl = isLocal ? "http://localhost:4000" : null;
 
@@ -19,6 +28,13 @@ type UserSpendData = {
   max_budget?: number | null;
 };
 
+function getCookie(name: string) {
+  console.log("COOKIES", document.cookie)
+  const cookieValue = document.cookie
+      .split('; ')
+      .find(row => row.startsWith(name + '='));
+  return cookieValue ? cookieValue.split('=')[1] : null;
+}
 
 interface UserDashboardProps {
   userID: string | null;
@@ -30,13 +46,15 @@ interface UserDashboardProps {
   setUserEmail: React.Dispatch<React.SetStateAction<string | null>>;
   setTeams: React.Dispatch<React.SetStateAction<Object[] | null>>;
   setKeys: React.Dispatch<React.SetStateAction<Object[] | null>>;
+  setProxySettings: React.Dispatch<React.SetStateAction<any>>;
+  proxySettings: any;
 }
 
 type TeamInterface = {
   models: any[];
   team_id: null;
-  team_alias: String
-}
+  team_alias: String;
+};
 
 const UserDashboard: React.FC<UserDashboardProps> = ({
   userID,
@@ -48,6 +66,8 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
   setUserEmail,
   setTeams,
   setKeys,
+  setProxySettings,
+  proxySettings,
 }) => {
   const [userSpendData, setUserSpendData] = useState<UserSpendData | null>(
     null
@@ -58,15 +78,18 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
   const viewSpend = searchParams.get("viewSpend");
   const router = useRouter();
 
-  const token = searchParams.get("token");
+  const token = getCookie('token');
+
+  const invitation_id = searchParams.get("invitation_id");
+
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [teamSpend, setTeamSpend] = useState<number | null>(null);
   const [userModels, setUserModels] = useState<string[]>([]);
   const defaultTeam: TeamInterface = {
-    "models": [],
-    "team_alias": "Default Team",
-    "team_id": null
-  }
+    models: [],
+    team_alias: "Default Team",
+    team_id: null,
+  };
   const [selectedTeam, setSelectedTeam] = useState<any | null>(
     teams ? teams[0] : defaultTeam
   );
@@ -96,6 +119,10 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
         return "Admin Viewer";
       case "app_user":
         return "App User";
+      case "internal_user":
+        return "Internal User";
+      case "internal_user_viewer":
+        return "Internal Viewer";
       default:
         return "Unknown Role";
     }
@@ -137,7 +164,17 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
       } else {
         const fetchData = async () => {
           try {
-            const response = await userInfoCall(accessToken, userID, userRole, false, null, null);
+            const proxy_settings = await getProxyBaseUrlAndLogoutUrl(accessToken);
+            setProxySettings(proxy_settings);
+
+            const response = await userInfoCall(
+              accessToken,
+              userID,
+              userRole,
+              false,
+              null,
+              null
+            );
             console.log(
               `received teams in user dashboard: ${Object.keys(
                 response
@@ -152,12 +189,12 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
             }
             setKeys(response["keys"]); // Assuming this is the correct path to your data
             setTeams(response["teams"]);
-            const teamsArray = [...response['teams']];
+            const teamsArray = [...response["teams"]];
             if (teamsArray.length > 0) {
-                console.log(`response['teams']: ${teamsArray}`);
-                setSelectedTeam(teamsArray[0]);
+              console.log(`response['teams']: ${teamsArray}`);
+              setSelectedTeam(teamsArray[0]);
             } else {
-                setSelectedTeam(defaultTeam);
+              setSelectedTeam(defaultTeam);
             }
             sessionStorage.setItem(
               "userData" + userID,
@@ -194,22 +231,30 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
         fetchData();
       }
     }
-    
   }, [userID, token, accessToken, keys, userRole]);
 
   useEffect(() => {
     // This code will run every time selectedTeam changes
-    if (keys !== null && selectedTeam !== null && selectedTeam !== undefined) {
+    if (
+      keys !== null &&
+      selectedTeam !== null &&
+      selectedTeam !== undefined &&
+      selectedTeam.team_id !== null
+    ) {
       let sum = 0;
       for (const key of keys) {
-        if (selectedTeam.hasOwnProperty('team_id') && key.team_id !== null && key.team_id === selectedTeam.team_id) {
+        if (
+          selectedTeam.hasOwnProperty("team_id") &&
+          key.team_id !== null &&
+          key.team_id === selectedTeam.team_id
+        ) {
           sum += key.spend;
         }
       }
       setTeamSpend(sum);
     } else if (keys !== null) {
       // sum the keys which don't have team-id set (default team)
-      let sum = 0 
+      let sum = 0;
       for (const key of keys) {
         sum += key.spend;
       }
@@ -217,11 +262,23 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
     }
   }, [selectedTeam]);
 
+
+  if (invitation_id != null) {
+    return (
+      <Onboarding></Onboarding>
+    )
+  }
+
   if (userID == null || token == null) {
-    // Now you can construct the full URL
+    // user is not logged in as yet 
     const url = proxyBaseUrl
       ? `${proxyBaseUrl}/sso/key/generate`
       : `/sso/key/generate`;
+    
+
+    // clear cookie called "token" since user will be logging in again
+    document.cookie = "token=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+
     console.log("Full URL:", url);
     window.location.href = url;
 
@@ -245,9 +302,8 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
   }
 
   console.log("inside user dashboard, selected team", selectedTeam);
-  console.log(`teamSpend: ${teamSpend}`)
   return (
-      <div className="w-full mx-4">
+    <div className="w-full mx-4">
       <Grid numItems={1} className="gap-2 p-8 h-[75vh] w-full mt-2">
         <Col numColSpan={1}>
           <ViewUserTeam
@@ -259,10 +315,10 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
           <ViewUserSpend
             userID={userID}
             userRole={userRole}
+            userMaxBudget={userSpendData?.max_budget || null}
             accessToken={accessToken}
             userSpend={teamSpend}
-            selectedTeam = {selectedTeam ? selectedTeam : null}
-
+            selectedTeam={selectedTeam ? selectedTeam : null}
           />
 
           <ViewKeyTable
@@ -283,7 +339,11 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
             data={keys}
             setData={setKeys}
           />
-          <DashboardTeam teams={teams} setSelectedTeam={setSelectedTeam} userRole={userRole}/>
+          <DashboardTeam
+            teams={teams}
+            setSelectedTeam={setSelectedTeam}
+            userRole={userRole}
+          />
         </Col>
       </Grid>
     </div>

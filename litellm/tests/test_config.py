@@ -2,22 +2,29 @@
 ## Unit tests for ProxyConfig class
 
 
-import sys, os
+import os
+import sys
 import traceback
+
 from dotenv import load_dotenv
 
 load_dotenv()
-import os, io
+import io
+import os
 
 sys.path.insert(
     0, os.path.abspath("../..")
-)  # Adds the parent directory to the, system path
-import pytest, litellm
-from pydantic import BaseModel
-from litellm.proxy.proxy_server import ProxyConfig
-from litellm.proxy.utils import encrypt_value, ProxyLogging, DualCache
-from litellm.types.router import Deployment, LiteLLM_Params, ModelInfo
+)  # Adds the parent directory to the system path
 from typing import Literal
+
+import pytest
+from pydantic import BaseModel, ConfigDict
+
+import litellm
+from litellm.proxy.common_utils.encrypt_decrypt_utils import encrypt_value
+from litellm.proxy.proxy_server import ProxyConfig
+from litellm.proxy.utils import DualCache, ProxyLogging
+from litellm.types.router import Deployment, LiteLLM_Params, ModelInfo
 
 
 class DBModel(BaseModel):
@@ -25,6 +32,8 @@ class DBModel(BaseModel):
     model_name: str
     model_info: dict
     litellm_params: dict
+
+    model_config = ConfigDict(protected_namespaces=())
 
 
 @pytest.mark.asyncio
@@ -99,7 +108,7 @@ async def test_delete_deployment():
     pc = ProxyConfig()
 
     db_model = DBModel(
-        model_id="12340523",
+        model_id=deployment.model_info.id,
         model_name="gpt-3.5-turbo",
         litellm_params=encrypted_litellm_params,
         model_info={"id": deployment.model_info.id},
@@ -137,6 +146,8 @@ async def test_add_existing_deployment():
             deployment_2.to_json(exclude_none=True),
         ]
     )
+
+    init_len_list = len(llm_router.model_list)
     print(f"llm_router: {llm_router}")
     master_key = "sk-1234"
     setattr(litellm.proxy.proxy_server, "llm_router", llm_router)
@@ -161,7 +172,7 @@ async def test_add_existing_deployment():
     db_models = [db_model]
     num_added = pc._add_deployment(db_models=db_models)
 
-    assert num_added == 0
+    assert init_len_list == len(llm_router.model_list)
 
 
 litellm_params = LiteLLM_Params(

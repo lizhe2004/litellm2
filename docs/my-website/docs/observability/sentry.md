@@ -1,5 +1,14 @@
 import Image from '@theme/IdealImage';
 
+
+:::tip
+
+This is community maintained, Please make an issue if you run into a bug
+https://github.com/BerriAI/litellm
+
+:::
+
+
 # Sentry - Log LLM Exceptions
 [Sentry](https://sentry.io/) provides error monitoring for production. LiteLLM can add breadcrumbs and send exceptions to Sentry with this integration
 
@@ -39,6 +48,10 @@ response = completion(model="gpt-3.5-turbo", messages=[{"role": "user", "content
 
 print(response)
 ```
+
+## Redacting Messages, Response Content from Sentry Logging 
+
+Set `litellm.turn_off_message_logging=True` This will prevent the messages and responses from being logged to sentry, but request metadata will still be logged.
 
 [Let us know](https://github.com/BerriAI/litellm/issues/new?assignees=&labels=enhancement&projects=&template=feature_request.yml&title=%5BFeature%5D%3A+) if you need any additional options from Sentry. 
 

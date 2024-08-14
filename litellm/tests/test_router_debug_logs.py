@@ -1,16 +1,23 @@
-import sys, os, time
-import traceback, asyncio
+import asyncio
+import os
+import sys
+import time
+import traceback
+
 import pytest
 
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
 
-import litellm, asyncio, logging
+import asyncio
+import logging
+
+import litellm
 from litellm import Router
 
 # this tests debug logs from litellm router and litellm proxy server
-from litellm._logging import verbose_router_logger, verbose_logger, verbose_proxy_logger
+from litellm._logging import verbose_logger, verbose_proxy_logger, verbose_router_logger
 
 
 # this tests debug logs from litellm router and litellm proxy server
@@ -46,6 +53,7 @@ def test_async_fallbacks(caplog):
     router = Router(
         model_list=model_list,
         fallbacks=[{"gpt-3.5-turbo": ["azure/gpt-3.5-turbo"]}],
+        num_retries=1,
     )
 
     user_message = "Hello, how are you?"
@@ -53,11 +61,11 @@ def test_async_fallbacks(caplog):
 
     async def _make_request():
         try:
-            response = await router.acompletion(
+            await router.acompletion(
                 model="gpt-3.5-turbo", messages=messages, max_tokens=1
             )
             router.reset()
-        except litellm.Timeout as e:
+        except litellm.Timeout:
             pass
         except Exception as e:
             pytest.fail(f"An exception occurred: {e}")
@@ -67,8 +75,7 @@ def test_async_fallbacks(caplog):
     asyncio.run(_make_request())
     captured_logs = [rec.message for rec in caplog.records]
 
-    # on circle ci the captured logs get some async task exception logs - filter them out
-    "Task exception was never retrieved"
+    # on circle ci the captured logs get some async task exception logs - filter them out "Task exception was never retrieved"
     captured_logs = [
         log
         for log in captured_logs
@@ -81,10 +88,10 @@ def test_async_fallbacks(caplog):
     # Define the expected log messages
     # - error request, falling back notice, success notice
     expected_logs = [
-        "Intialized router with Routing strategy: simple-shuffle\n\nRouting fallbacks: [{'gpt-3.5-turbo': ['azure/gpt-3.5-turbo']}]\n\nRouting context window fallbacks: None\n\nRouter Redis Caching=None",
-        "litellm.acompletion(model=gpt-3.5-turbo)\x1b[31m Exception OpenAIException - Error code: 401 - {'error': {'message': 'Incorrect API key provided: bad-key. You can find your API key at https://platform.openai.com/account/api-keys.', 'type': 'invalid_request_error', 'param': None, 'code': 'invalid_api_key'}}\x1b[0m",
+        "litellm.acompletion(model=gpt-3.5-turbo)\x1b[31m Exception litellm.AuthenticationError: AuthenticationError: OpenAIException - Incorrect API key provided: bad-key. You can find your API key at https://platform.openai.com/account/api-keys.\x1b[0m",
         "Falling back to model_group = azure/gpt-3.5-turbo",
         "litellm.acompletion(model=azure/chatgpt-v-2)\x1b[32m 200 OK\x1b[0m",
+        "Successful fallback b/w models.",
     ]
 
     # Assert that the captured logs match the expected log messages

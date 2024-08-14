@@ -1,19 +1,33 @@
-import json, copy, types
+####################################
+######### DEPRECATED FILE ##########
+####################################
+# logic moved to `bedrock_httpx.py` #
+
+import copy
+import json
 import os
+import time
+import types
+import uuid
 from enum import Enum
-import time, uuid
-from typing import Callable, Optional, Any, Union, List
+from typing import Any, Callable, List, Optional, Union
+
+import httpx
+from openai.types.image import Image
+
 import litellm
-from litellm.utils import ModelResponse, get_secret, Usage, ImageResponse
+from litellm.litellm_core_utils.core_helpers import map_finish_reason
+from litellm.types.utils import ImageResponse, ModelResponse, Usage
+from litellm.utils import get_secret
+
 from .prompt_templates.factory import (
-    prompt_factory,
-    custom_prompt,
     construct_tool_use_system_prompt,
+    contains_tag,
+    custom_prompt,
     extract_between_tags,
     parse_xml_params,
-    contains_tag,
+    prompt_factory,
 )
-import httpx
 
 
 class BedrockError(Exception):
@@ -27,6 +41,34 @@ class BedrockError(Exception):
         super().__init__(
             self.message
         )  # Call the base class constructor with the parameters it needs
+
+
+class AmazonBedrockGlobalConfig:
+    def __init__(self):
+        pass
+
+    def get_mapped_special_auth_params(self) -> dict:
+        """
+        Mapping of common auth params across bedrock/vertex/azure/watsonx
+        """
+        return {"region_name": "aws_region_name"}
+
+    def map_special_auth_params(self, non_default_params: dict, optional_params: dict):
+        mapped_params = self.get_mapped_special_auth_params()
+        for param, value in non_default_params.items():
+            if param in mapped_params:
+                optional_params[mapped_params[param]] = value
+        return optional_params
+
+    def get_eu_regions(self) -> List[str]:
+        """
+        Source: https://www.aws-services.info/bedrock.html
+        """
+        return [
+            "eu-west-1",
+            "eu-west-3",
+            "eu-central-1",
+        ]
 
 
 class AmazonTitanConfig:
@@ -139,6 +181,7 @@ class AmazonAnthropicClaude3Config:
             "stop",
             "temperature",
             "top_p",
+            "extra_headers",
         ]
 
     def map_openai_params(self, non_default_params: dict, optional_params: dict):
@@ -506,6 +549,17 @@ class AmazonStabilityConfig:
         }
 
 
+def add_custom_header(headers):
+    """Closure to capture the headers and add them."""
+
+    def callback(request, **kwargs):
+        """Actual callback function that Boto3 will call."""
+        for header_name, header_value in headers.items():
+            request.headers.add_header(header_name, header_value)
+
+    return callback
+
+
 def init_bedrock_client(
     region_name=None,
     aws_access_key_id: Optional[str] = None,
@@ -515,12 +569,13 @@ def init_bedrock_client(
     aws_session_name: Optional[str] = None,
     aws_profile_name: Optional[str] = None,
     aws_role_name: Optional[str] = None,
-    timeout: Optional[int] = None,
+    aws_web_identity_token: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
+    timeout: Optional[Union[float, httpx.Timeout]] = None,
 ):
     # check for custom AWS_REGION_NAME and use it if not passed to init_bedrock_client
     litellm_aws_region_name = get_secret("AWS_REGION_NAME", None)
     standard_aws_region_name = get_secret("AWS_REGION", None)
-
     ## CHECK IS  'os.environ/' passed in
     # Define the list of parameters to check
     params_to_check = [
@@ -531,6 +586,7 @@ def init_bedrock_client(
         aws_session_name,
         aws_profile_name,
         aws_role_name,
+        aws_web_identity_token,
     ]
 
     # Iterate over parameters and update if needed
@@ -546,6 +602,7 @@ def init_bedrock_client(
         aws_session_name,
         aws_profile_name,
         aws_role_name,
+        aws_web_identity_token,
     ) = params_to_check
 
     ### SET REGION NAME
@@ -574,10 +631,50 @@ def init_bedrock_client(
 
     import boto3
 
-    config = boto3.session.Config(connect_timeout=timeout, read_timeout=timeout)
+    if isinstance(timeout, float):
+        config = boto3.session.Config(connect_timeout=timeout, read_timeout=timeout)
+    elif isinstance(timeout, httpx.Timeout):
+        config = boto3.session.Config(
+            connect_timeout=timeout.connect, read_timeout=timeout.read
+        )
+    else:
+        config = boto3.session.Config()
 
     ### CHECK STS ###
-    if aws_role_name is not None and aws_session_name is not None:
+    if (
+        aws_web_identity_token is not None
+        and aws_role_name is not None
+        and aws_session_name is not None
+    ):
+        oidc_token = get_secret(aws_web_identity_token)
+
+        if oidc_token is None:
+            raise BedrockError(
+                message="OIDC token could not be retrieved from secret manager.",
+                status_code=401,
+            )
+
+        sts_client = boto3.client("sts")
+
+        # https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html
+        # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/sts/client/assume_role_with_web_identity.html
+        sts_response = sts_client.assume_role_with_web_identity(
+            RoleArn=aws_role_name,
+            RoleSessionName=aws_session_name,
+            WebIdentityToken=oidc_token,
+            DurationSeconds=3600,
+        )
+
+        client = boto3.client(
+            service_name="bedrock-runtime",
+            aws_access_key_id=sts_response["Credentials"]["AccessKeyId"],
+            aws_secret_access_key=sts_response["Credentials"]["SecretAccessKey"],
+            aws_session_token=sts_response["Credentials"]["SessionToken"],
+            region_name=region_name,
+            endpoint_url=endpoint_url,
+            config=config,
+        )
+    elif aws_role_name is not None and aws_session_name is not None:
         # use sts if role name passed in
         sts_client = boto3.client(
             "sts",
@@ -629,40 +726,41 @@ def init_bedrock_client(
             endpoint_url=endpoint_url,
             config=config,
         )
+    if extra_headers:
+        client.meta.events.register(
+            "before-sign.bedrock-runtime.*", add_custom_header(extra_headers)
+        )
 
     return client
 
 
 def convert_messages_to_prompt(model, messages, provider, custom_prompt_dict):
     # handle anthropic prompts and amazon titan prompts
-    if provider == "anthropic" or provider == "amazon":
-        if model in custom_prompt_dict:
-            # check if the model has a registered custom prompt
-            model_prompt_details = custom_prompt_dict[model]
-            prompt = custom_prompt(
-                role_dict=model_prompt_details["roles"],
-                initial_prompt_value=model_prompt_details["initial_prompt_value"],
-                final_prompt_value=model_prompt_details["final_prompt_value"],
-                messages=messages,
-            )
-        else:
+    chat_template_provider = ["anthropic", "amazon", "mistral", "meta"]
+    if model in custom_prompt_dict:
+        # check if the model has a registered custom prompt
+        model_prompt_details = custom_prompt_dict[model]
+        prompt = custom_prompt(
+            role_dict=model_prompt_details["roles"],
+            initial_prompt_value=model_prompt_details["initial_prompt_value"],
+            final_prompt_value=model_prompt_details["final_prompt_value"],
+            messages=messages,
+        )
+    else:
+        if provider in chat_template_provider:
             prompt = prompt_factory(
                 model=model, messages=messages, custom_llm_provider="bedrock"
             )
-    elif provider == "mistral":
-        prompt = prompt_factory(
-            model=model, messages=messages, custom_llm_provider="bedrock"
-        )
-    else:
-        prompt = ""
-        for message in messages:
-            if "role" in message:
-                if message["role"] == "user":
-                    prompt += f"{message['content']}"
+        else:
+            prompt = ""
+            for message in messages:
+                if "role" in message:
+                    if message["role"] == "user":
+                        prompt += f"{message['content']}"
+                    else:
+                        prompt += f"{message['content']}"
                 else:
                     prompt += f"{message['content']}"
-            else:
-                prompt += f"{message['content']}"
     return prompt
 
 
@@ -688,6 +786,7 @@ def completion(
     litellm_params=None,
     logger_fn=None,
     timeout=None,
+    extra_headers: Optional[dict] = None,
 ):
     exception_mapping_worked = False
     _is_function_call = False
@@ -703,6 +802,7 @@ def completion(
         aws_bedrock_runtime_endpoint = optional_params.pop(
             "aws_bedrock_runtime_endpoint", None
         )
+        aws_web_identity_token = optional_params.pop("aws_web_identity_token", None)
 
         # use passed in BedrockRuntime.Client if provided, otherwise create a new one
         client = optional_params.pop("aws_bedrock_client", None)
@@ -717,6 +817,8 @@ def completion(
                 aws_role_name=aws_role_name,
                 aws_session_name=aws_session_name,
                 aws_profile_name=aws_profile_name,
+                aws_web_identity_token=aws_web_identity_token,
+                extra_headers=extra_headers,
                 timeout=timeout,
             )
 
@@ -930,7 +1032,7 @@ def completion(
             original_response=json.dumps(response_body),
             additional_args={"complete_input_dict": data},
         )
-        print_verbose(f"raw model_response: {response}")
+        print_verbose(f"raw model_response: {response_body}")
         ## RESPONSE OBJECT
         outputText = "default"
         if provider == "ai21":
@@ -1021,28 +1123,33 @@ def completion(
                             logging_obj=logging_obj,
                         )
 
-                model_response["finish_reason"] = response_body["stop_reason"]
+                model_response.choices[0].finish_reason = map_finish_reason(
+                    response_body["stop_reason"]
+                )
                 _usage = litellm.Usage(
                     prompt_tokens=response_body["usage"]["input_tokens"],
                     completion_tokens=response_body["usage"]["output_tokens"],
                     total_tokens=response_body["usage"]["input_tokens"]
                     + response_body["usage"]["output_tokens"],
                 )
-                model_response.usage = _usage
+                setattr(model_response, "usage", _usage)
             else:
                 outputText = response_body["completion"]
-                model_response["finish_reason"] = response_body["stop_reason"]
+                model_response.choices[0].finish_reason = response_body["stop_reason"]
         elif provider == "cohere":
             outputText = response_body["generations"][0]["text"]
         elif provider == "meta":
             outputText = response_body["generation"]
         elif provider == "mistral":
             outputText = response_body["outputs"][0]["text"]
-            model_response["finish_reason"] = response_body["outputs"][0]["stop_reason"]
+            model_response.choices[0].finish_reason = response_body["outputs"][0][
+                "stop_reason"
+            ]
         else:  # amazon titan
             outputText = response_body.get("results")[0].get("outputText")
 
         response_metadata = response.get("ResponseMetadata", {})
+
         if response_metadata.get("HTTPStatusCode", 500) >= 400:
             raise BedrockError(
                 message=outputText,
@@ -1056,7 +1163,7 @@ def completion(
                     and getattr(model_response.choices[0].message, "tool_calls", None)
                     is None
                 ):
-                    model_response["choices"][0]["message"]["content"] = outputText
+                    model_response.choices[0].message.content = outputText
                 elif (
                     hasattr(model_response.choices[0], "message")
                     and getattr(model_response.choices[0].message, "tool_calls", None)
@@ -1071,16 +1178,20 @@ def completion(
                     status_code=response_metadata.get("HTTPStatusCode", 500),
                 )
 
-        ## CALCULATING USAGE - baseten charges on time, not tokens - have some mapping of cost here.
-        if getattr(model_response.usage, "total_tokens", None) is None:
+        ## CALCULATING USAGE - bedrock charges on time, not tokens - have some mapping of cost here.
+        if not hasattr(model_response, "usage"):
+            setattr(model_response, "usage", Usage())
+        if getattr(model_response.usage, "total_tokens", None) is None:  # type: ignore
             prompt_tokens = response_metadata.get(
                 "x-amzn-bedrock-input-token-count", len(encoding.encode(prompt))
             )
+            _text_response = model_response["choices"][0]["message"].get("content", "")
             completion_tokens = response_metadata.get(
                 "x-amzn-bedrock-output-token-count",
                 len(
                     encoding.encode(
-                        model_response["choices"][0]["message"].get("content", "")
+                        _text_response,
+                        disallowed_special=(),
                     )
                 ),
             )
@@ -1089,10 +1200,10 @@ def completion(
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens,
             )
-            model_response.usage = usage
+            setattr(model_response, "usage", usage)
 
-        model_response["created"] = int(time.time())
-        model_response["model"] = model
+        model_response.created = int(time.time())
+        model_response.model = model
 
         model_response._hidden_params["region_name"] = client.meta.region_name
         print_verbose(f"model_response._hidden_params: {model_response._hidden_params}")
@@ -1167,7 +1278,7 @@ def _embedding_func_single(
             "input_type", "search_document"
         )  # aws bedrock example default - https://us-east-1.console.aws.amazon.com/bedrock/home?region=us-east-1#/providers?model=cohere.embed-english-v3
         data = {"texts": [input], **inference_params}  # type: ignore
-    body = json.dumps(data).encode("utf-8")
+    body = json.dumps(data).encode("utf-8")  # type: ignore
     ## LOGGING
     request_str = f"""
     response = client.invoke_model(
@@ -1215,9 +1326,9 @@ def _embedding_func_single(
 def embedding(
     model: str,
     input: Union[list, str],
+    model_response: litellm.EmbeddingResponse,
     api_key: Optional[str] = None,
     logging_obj=None,
-    model_response=None,
     optional_params=None,
     encoding=None,
 ):
@@ -1231,6 +1342,7 @@ def embedding(
     aws_bedrock_runtime_endpoint = optional_params.pop(
         "aws_bedrock_runtime_endpoint", None
     )
+    aws_web_identity_token = optional_params.pop("aws_web_identity_token", None)
 
     # use passed in BedrockRuntime.Client if provided, otherwise create a new one
     client = init_bedrock_client(
@@ -1238,6 +1350,7 @@ def embedding(
         aws_secret_access_key=aws_secret_access_key,
         aws_region_name=aws_region_name,
         aws_bedrock_runtime_endpoint=aws_bedrock_runtime_endpoint,
+        aws_web_identity_token=aws_web_identity_token,
         aws_role_name=aws_role_name,
         aws_session_name=aws_session_name,
     )
@@ -1281,9 +1394,9 @@ def embedding(
                 "embedding": embedding,
             }
         )
-    model_response["object"] = "list"
-    model_response["data"] = embedding_response
-    model_response["model"] = model
+    model_response.object = "list"
+    model_response.data = embedding_response
+    model_response.model = model
     input_tokens = 0
 
     input_str = "".join(input)
@@ -1301,10 +1414,10 @@ def embedding(
 def image_generation(
     model: str,
     prompt: str,
+    model_response: ImageResponse,
+    optional_params: dict,
     timeout=None,
     logging_obj=None,
-    model_response=None,
-    optional_params=None,
     aimg_generation=False,
 ):
     """
@@ -1320,6 +1433,7 @@ def image_generation(
     aws_bedrock_runtime_endpoint = optional_params.pop(
         "aws_bedrock_runtime_endpoint", None
     )
+    aws_web_identity_token = optional_params.pop("aws_web_identity_token", None)
 
     # use passed in BedrockRuntime.Client if provided, otherwise create a new one
     client = init_bedrock_client(
@@ -1327,6 +1441,7 @@ def image_generation(
         aws_secret_access_key=aws_secret_access_key,
         aws_region_name=aws_region_name,
         aws_bedrock_runtime_endpoint=aws_bedrock_runtime_endpoint,
+        aws_web_identity_token=aws_web_identity_token,
         aws_role_name=aws_role_name,
         aws_session_name=aws_session_name,
         timeout=timeout,
@@ -1359,7 +1474,7 @@ def image_generation(
     ## LOGGING
     request_str = f"""
     response = client.invoke_model(
-        body={body},
+        body={body}, # type: ignore
         modelId={modelId},
         accept="application/json",
         contentType="application/json",
@@ -1399,9 +1514,10 @@ def image_generation(
     if model_response is None:
         model_response = ImageResponse()
 
-    image_list: List = []
+    image_list: List[Image] = []
     for artifact in response_body["artifacts"]:
-        image_dict = {"url": artifact["base64"]}
+        _image = Image(b64_json=artifact["base64"])
+        image_list.append(_image)
 
-    model_response.data = image_dict
+    model_response.data = image_list
     return model_response

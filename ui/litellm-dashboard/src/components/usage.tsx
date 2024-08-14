@@ -1,29 +1,64 @@
-import { BarChart, BarList, Card, Title, Table, TableHead, TableHeaderCell, TableRow, TableCell, TableBody, Metric } from "@tremor/react";
+import { BarChart, BarList, Card, Title, Table, TableHead, TableHeaderCell, TableRow, TableCell, TableBody, Metric, Subtitle } from "@tremor/react";
 
 import React, { useState, useEffect } from "react";
 
 import ViewUserSpend from "./view_user_spend";
-import { Grid, Col, Text, LineChart, TabPanel, TabPanels, TabGroup, TabList, Tab, Select, SelectItem } from "@tremor/react";
+import { 
+  Grid, Col, Text, 
+  LineChart, TabPanel, TabPanels, 
+  TabGroup, TabList, Tab, Select, SelectItem, 
+  DateRangePicker, DateRangePickerValue, 
+  DonutChart,
+  AreaChart,
+  Callout,
+  Button,
+  MultiSelect,
+  MultiSelectItem,
+} from "@tremor/react";
+
+import {
+  Select as Select2
+} from "antd";
+
 import {
   userSpendLogsCall,
   keyInfoCall,
   adminSpendLogsCall,
   adminTopKeysCall,
   adminTopModelsCall,
+  adminTopEndUsersCall,
   teamSpendLogsCall,
   tagsSpendLogsCall,
+  allTagNamesCall,
   modelMetricsCall,
   modelAvailableCall,
-  modelInfoCall,
+  adminspendByProvider,
+  adminGlobalActivity,
+  adminGlobalActivityPerModel,
 } from "./networking";
 import { start } from "repl";
+console.log("process.env.NODE_ENV", process.env.NODE_ENV);
+const isLocal = process.env.NODE_ENV === "development";
+const proxyBaseUrl = isLocal ? "http://localhost:4000" : null;
+if (isLocal !== true) {
+  console.log = function() {};
+}
 
 interface UsagePageProps {
   accessToken: string | null;
   token: string | null;
   userRole: string | null;
   userID: string | null;
+  keys: any[] | null;
+  premiumUser: boolean;
 }
+
+interface GlobalActivityData {
+  sum_api_requests: number;
+  sum_total_tokens: number;
+  daily_data: { date: string; api_requests: number; total_tokens: number }[];
+}
+
 
 type CustomTooltipTypeBar = {
   payload: any;
@@ -95,47 +130,15 @@ function getTopKeys(data: Array<{ [key: string]: unknown }>): any[] {
 }
 type DataDict = { [key: string]: unknown };
 type UserData = { user_id: string; spend: number };
-function getTopUsers(data: Array<DataDict>): UserData[] {
-  const userSpend: { [key: string]: number } = {};
 
-  data.forEach((dict) => {
-    const payload: DataDict = dict["users"] as DataDict;
-    Object.entries(payload).forEach(([user_id, value]) => {
-      if (
-        user_id === "" ||
-        user_id === undefined ||
-        user_id === null ||
-        user_id == "None"
-      ) {
-        return;
-      }
-
-      if (!userSpend[user_id]) {
-        userSpend[user_id] = 0;
-      }
-      userSpend[user_id] += value as number;
-    });
-  });
-
-  const spendUsers: UserData[] = Object.entries(userSpend).map(
-    ([user_id, spend]) => ({
-      user_id,
-      spend,
-    })
-  );
-
-  spendUsers.sort((a, b) => b.spend - a.spend);
-
-  const topKeys = spendUsers.slice(0, 5);
-  console.log(`topKeys: ${Object.values(topKeys[0])}`);
-  return topKeys;
-}
 
 const UsagePage: React.FC<UsagePageProps> = ({
   accessToken,
   token,
   userRole,
   userID,
+  keys,
+  premiumUser,
 }) => {
   const currentDate = new Date();
   const [keySpendData, setKeySpendData] = useState<any[]>([]);
@@ -144,12 +147,18 @@ const UsagePage: React.FC<UsagePageProps> = ({
   const [topUsers, setTopUsers] = useState<any[]>([]);
   const [teamSpendData, setTeamSpendData] = useState<any[]>([]);
   const [topTagsData, setTopTagsData] = useState<any[]>([]);
+  const [allTagNames, setAllTagNames] = useState<string[]>([]);
   const [uniqueTeamIds, setUniqueTeamIds] = useState<any[]>([]);
   const [totalSpendPerTeam, setTotalSpendPerTeam] = useState<any[]>([]);
-  const [modelMetrics, setModelMetrics] = useState<any[]>([]);
-  const [modelLatencyMetrics, setModelLatencyMetrics] = useState<any[]>([]);
-  const [modelGroups, setModelGroups] = useState<any[]>([]);
-  const [selectedModelGroup, setSelectedModelGroup] = useState<string | null>(null);
+  const [spendByProvider, setSpendByProvider] = useState<any[]>([]);
+  const [globalActivity, setGlobalActivity] = useState<GlobalActivityData>({} as GlobalActivityData);
+  const [globalActivityPerModel, setGlobalActivityPerModel] = useState<any[]>([]);
+  const [selectedKeyID, setSelectedKeyID] = useState<string | null>("");
+  const [selectedTags, setSelectedTags] = useState<string[]>(["all-tags"]);
+  const [dateValue, setDateValue] = useState<DateRangePickerValue>({
+    from: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000), 
+    to: new Date(),
+  });
 
   const firstDay = new Date(
     currentDate.getFullYear(),
@@ -164,6 +173,70 @@ const UsagePage: React.FC<UsagePageProps> = ({
 
   let startTime = formatDate(firstDay);
   let endTime = formatDate(lastDay);
+
+  console.log("keys in usage", keys);
+  console.log("premium user in usage", premiumUser);
+
+  function valueFormatterNumbers(number: number) {
+    const formatter = new Intl.NumberFormat('en-US', {
+      maximumFractionDigits: 0,
+      notation: 'compact',
+      compactDisplay: 'short',
+    });
+  
+    return formatter.format(number);
+  }
+
+  useEffect(() => {
+    updateTagSpendData(dateValue.from, dateValue.to);
+  }, [dateValue, selectedTags]);
+  
+
+  const updateEndUserData = async (startTime:  Date | undefined, endTime:  Date | undefined, uiSelectedKey: string | null) => {
+    if (!startTime || !endTime || !accessToken) {
+      return;
+    }
+
+    // the endTime put it to the last hour of the selected date
+    endTime.setHours(23, 59, 59, 999);
+
+    // startTime put it to the first hour of the selected date
+    startTime.setHours(0, 0, 0, 0);
+
+    console.log("uiSelectedKey", uiSelectedKey);
+
+    let newTopUserData = await adminTopEndUsersCall(
+      accessToken,
+      uiSelectedKey,
+      startTime.toISOString(),
+      endTime.toISOString()
+    )
+    console.log("End user data updated successfully", newTopUserData);
+    setTopUsers(newTopUserData);
+  
+  }
+
+  const updateTagSpendData = async (startTime:  Date | undefined, endTime:  Date | undefined) => {
+    if (!startTime || !endTime || !accessToken) {
+      return;
+    }
+
+    // the endTime put it to the last hour of the selected date
+    endTime.setHours(23, 59, 59, 999);
+
+    // startTime put it to the first hour of the selected date
+    startTime.setHours(0, 0, 0, 0);
+
+    let top_tags = await tagsSpendLogsCall(
+      accessToken, 
+      startTime.toISOString(), 
+      endTime.toISOString(),
+      selectedTags.length === 0 ? undefined : selectedTags
+    );
+    setTopTagsData(top_tags.spend_per_tag);
+    console.log("Tag spend data updated successfully");
+
+  }
 
   function formatDate(date: Date) {
     const year = date.getFullYear();
@@ -195,9 +268,15 @@ const UsagePage: React.FC<UsagePageProps> = ({
           if (userRole == "Admin" || userRole == "Admin Viewer") {
             const overall_spend = await adminSpendLogsCall(accessToken);
             setKeySpendData(overall_spend);
+
+            const provider_spend = await adminspendByProvider(accessToken, token, startTime, endTime);
+            console.log("provider_spend", provider_spend);
+            setSpendByProvider(provider_spend);
+
+
             const top_keys = await adminTopKeysCall(accessToken);
             const filtered_keys = top_keys.map((k: any) => ({
-              key: (k["key_name"] || k["key_alias"] || k["api_key"]).substring(
+              key: (k["key_alias"] || k["key_name"] || k["api_key"]).substring(
                 0,
                 10
               ),
@@ -222,32 +301,37 @@ const UsagePage: React.FC<UsagePageProps> = ({
             total_spend_per_team = total_spend_per_team.map((tspt: any) => {
               tspt["name"] = tspt["team_id"] || "";
               tspt["value"] = tspt["total_spend"] || 0;
+              // round the value to 2 decimal places
+
+              tspt["value"] = tspt["value"].toFixed(2);
+              
+
               return tspt;
             })
 
             setTotalSpendPerTeam(total_spend_per_team);
 
+            // all_tag_names -> used for dropdown
+            const all_tag_names = await allTagNamesCall(accessToken);
+            setAllTagNames(all_tag_names.tag_names);
+
             //get top tags
-            const top_tags = await tagsSpendLogsCall(accessToken);
-            setTopTagsData(top_tags.top_10_tags);
+            const top_tags = await tagsSpendLogsCall(accessToken, dateValue.from?.toISOString(), dateValue.to?.toISOString(), undefined);
+            setTopTagsData(top_tags.spend_per_tag);
 
-            // get model groups 
-            const _model_groups = await modelInfoCall(accessToken, userID, userRole);
-            let model_groups = _model_groups.data;
-            console.log("model groups in model dashboard", model_groups);
 
-            let available_model_groups = [];
-            // loop through each model in model_group, access litellm_params and only inlclude the model if model["litellm_params"]["model"] startswith "azure/"
-            for (let i = 0; i < model_groups.length; i++) {
-              let model = model_groups[i];
-              console.log("model check", model);
-              let model_group = model["litellm_params"]["model"];
-              console.log("model group", model_group);
-              if (model_group.startsWith("azure/")) {
-                available_model_groups.push(model["model_name"]);
-              }
-            }
-            setModelGroups(available_model_groups);
+            // get spend per end-user
+            let spend_user_call = await adminTopEndUsersCall(accessToken, null, undefined, undefined);
+            setTopUsers(spend_user_call);
+
+            console.log("spend/user result", spend_user_call);
+
+            let global_activity_response = await adminGlobalActivity(accessToken, startTime, endTime);
+            setGlobalActivity(global_activity_response)
+
+            let global_activity_per_model = await adminGlobalActivityPerModel(accessToken, startTime, endTime);
+            console.log("global activity per model", global_activity_per_model);
+            setGlobalActivityPerModel(global_activity_per_model)
 
 
           } else if (userRole == "App Owner") {
@@ -281,27 +365,10 @@ const UsagePage: React.FC<UsagePageProps> = ({
                   spend: k["spend"],
                 }));
                 setTopKeys(filtered_keys);
-                setTopUsers(getTopUsers(response));
                 setKeySpendData(response);
               }
             });
           }
-
-          const modelMetricsResponse = await modelMetricsCall(
-            accessToken,
-            userID,
-            userRole,
-            null
-          );
-  
-          console.log("Model metrics response:", modelMetricsResponse);
-          // Sort by latency (avg_latency_seconds)
-          const sortedByLatency = [...modelMetricsResponse].sort((a, b) => b.avg_latency_seconds - a.avg_latency_seconds);
-          console.log("Sorted by latency:", sortedByLatency);
-
-          setModelMetrics(modelMetricsResponse);
-          setModelLatencyMetrics(sortedByLatency);
-
         } catch (error) {
           console.error("There was an error fetching the data", error);
           // Optionally, update your UI to reflect the error state here as well
@@ -312,49 +379,35 @@ const UsagePage: React.FC<UsagePageProps> = ({
   }, [accessToken, token, userRole, userID, startTime, endTime]);
 
 
-  const updateModelMetrics = async (modelGroup: string | null) => {
-    console.log("Updating model metrics for group:", modelGroup);
-    if (!accessToken || !userID || !userRole) {
-      return
-    }
-    setSelectedModelGroup(modelGroup);  // If you want to store the selected model group in state
-
-  
-    try {
-      const modelMetricsResponse = await modelMetricsCall(accessToken, userID, userRole, modelGroup);
-      console.log("Model metrics response:", modelMetricsResponse);
-  
-      // Assuming modelMetricsResponse now contains the metric data for the specified model group
-      const sortedByLatency = [...modelMetricsResponse].sort((a, b) => b.avg_latency_seconds - a.avg_latency_seconds);
-      console.log("Sorted by latency:", sortedByLatency);
-  
-      setModelMetrics(modelMetricsResponse);
-      setModelLatencyMetrics(sortedByLatency);
-    } catch (error) {
-      console.error("Failed to fetch model metrics", error);
-    }
-  }
-  
-
   return (
     <div style={{ width: "100%" }} className="p-8">
-      <ViewUserSpend
+      
+      <TabGroup>
+        <TabList className="mt-2">
+          <Tab>All Up</Tab>
+          <Tab>Team Based Usage</Tab>
+          <Tab>Customer Usage</Tab>
+           <Tab>Tag Based Usage</Tab>
+        </TabList>
+        <TabPanels>
+          <TabPanel>
+
+          <TabGroup>
+            <TabList variant="solid" className="mt-1">
+            <Tab>Cost</Tab>
+            <Tab>Activity</Tab>
+          </TabList>
+        <TabPanels>
+          <TabPanel>
+            <Grid numItems={2} className="gap-2 h-[100vh] w-full">
+            <ViewUserSpend
             userID={userID}
             userRole={userRole}
             accessToken={accessToken}
             userSpend={null}
             selectedTeam={null}
+            userMaxBudget={null}
           />
-      <TabGroup>
-        <TabList className="mt-2">
-          <Tab>All Up</Tab>
-          <Tab>Team Based Usage</Tab>
-           <Tab>Tag Based Usage</Tab>
-           <Tab>Model Based Usage</Tab>
-        </TabList>
-        <TabPanels>
-          <TabPanel>
-            <Grid numItems={2} className="gap-2 h-[75vh] w-full">
               <Col numColSpan={2}>
                 <Card>
                   <Title>Monthly Spend</Title>
@@ -388,23 +441,7 @@ const UsagePage: React.FC<UsagePageProps> = ({
                 </Card>
               </Col>
               <Col numColSpan={1}>
-                <Card>
-                  <Title>Top Users</Title>
-                  <BarChart
-                    className="mt-4 h-40"
-                    data={topUsers}
-                    index="user_id"
-                    categories={["spend"]}
-                    colors={["blue"]}
-                    yAxisWidth={200}
-                    layout="vertical"
-                    showXAxis={false}
-                    showLegend={false}
-                  />
-                </Card>
-              </Col>
-              <Col numColSpan={1}>
-                <Card>
+              <Card>
                   <Title>Top Models</Title>
                   <BarChart
                     className="mt-4 h-40"
@@ -418,8 +455,204 @@ const UsagePage: React.FC<UsagePageProps> = ({
                     showLegend={false}
                   />
                 </Card>
+               
               </Col>
+              <Col numColSpan={1}>
+                
+              </Col>
+              <Col numColSpan={2}>
+              <Card className="mb-2">
+                <Title>✨ Spend by Provider</Title>
+                {
+                  premiumUser ? (
+                    <>
+                    <Grid numItems={2}>
+                  <Col numColSpan={1}>
+                    <DonutChart
+                      className="mt-4 h-40"
+                      variant="pie"
+                      data={spendByProvider}
+                      index="provider"
+                      category="spend"
+                    />
+                  </Col>
+                  <Col numColSpan={1}>
+                    <Table>
+                      <TableHead>
+                        <TableRow>
+                          <TableHeaderCell>Provider</TableHeaderCell>
+                          <TableHeaderCell>Spend</TableHeaderCell>
+                        </TableRow>
+                      </TableHead>
+                      <TableBody>
+                        {spendByProvider.map((provider) => (
+                          <TableRow key={provider.provider}>
+                            <TableCell>{provider.provider}</TableCell>
+                            <TableCell>
+                              {parseFloat(provider.spend.toFixed(2)) < 0.00001
+                                ? "less than 0.00"
+                                : provider.spend.toFixed(2)}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </Col>
+                </Grid>
+                    </>
+                  ) : (
+                    <div>
+                    <p className="mb-2 text-gray-500 italic text-[12px]">Upgrade to use this feature</p>
+                    <Button variant="primary" className="mb-2">
+                          <a href="https://forms.gle/W3U4PZpJGFHWtHyA9" target="_blank">
+                            Get Free Trial
+                          </a>
+                        </Button>
+                    </div>
+                  )
+                }
+                
+              </Card>
+            </Col>
             </Grid>
+            </TabPanel>
+            <TabPanel>
+              <Grid numItems={1} className="gap-2 h-[75vh] w-full">
+                <Card>
+                <Title>All Up</Title>
+                <Grid numItems={2}>
+                <Col>
+                <Subtitle style={{ fontSize: "15px", fontWeight: "normal", color: "#535452"}}>API Requests { valueFormatterNumbers(globalActivity.sum_api_requests)}</Subtitle>
+                <AreaChart
+                    className="h-40"
+                    data={globalActivity.daily_data}
+                    valueFormatter={valueFormatterNumbers}
+                    index="date"
+                    colors={['cyan']}
+                    categories={['api_requests']}
+                    onValueChange={(v) => console.log(v)}
+                  />
+
+                </Col>
+                <Col>
+                <Subtitle style={{ fontSize: "15px", fontWeight: "normal", color: "#535452"}}>Tokens { valueFormatterNumbers(globalActivity.sum_total_tokens)}</Subtitle>
+                <BarChart
+                    className="h-40"
+                    data={globalActivity.daily_data}
+                    valueFormatter={valueFormatterNumbers}
+                    index="date"
+                    colors={['cyan']}
+                    categories={['total_tokens']}
+                    onValueChange={(v) => console.log(v)}
+                  />
+                </Col>
+                </Grid>
+                
+
+                </Card>
+
+                {
+                  premiumUser ? ( 
+                    <>
+                    {globalActivityPerModel.map((globalActivity, index) => (
+                <Card key={index}>
+                  <Title>{globalActivity.model}</Title>
+                  <Grid numItems={2}>
+                    <Col>
+                      <Subtitle style={{ fontSize: "15px", fontWeight: "normal", color: "#535452"}}>API Requests {valueFormatterNumbers(globalActivity.sum_api_requests)}</Subtitle>
+                      <AreaChart
+                        className="h-40"
+                        data={globalActivity.daily_data}
+                        index="date"
+                        colors={['cyan']}
+                        categories={['api_requests']}
+                        valueFormatter={valueFormatterNumbers}
+                        onValueChange={(v) => console.log(v)}
+                      />
+                    </Col>
+                    <Col>
+                      <Subtitle style={{ fontSize: "15px", fontWeight: "normal", color: "#535452"}}>Tokens {valueFormatterNumbers(globalActivity.sum_total_tokens)}</Subtitle>
+                      <BarChart
+                        className="h-40"
+                        data={globalActivity.daily_data}
+                        index="date"
+                        colors={['cyan']}
+                        categories={['total_tokens']}
+                        valueFormatter={valueFormatterNumbers}
+                        onValueChange={(v) => console.log(v)}
+                      />
+                    </Col>
+                  </Grid>
+                </Card>
+              ))}
+                    </>
+                  ) : 
+                  <>
+                  {globalActivityPerModel && globalActivityPerModel.length > 0 &&
+                    globalActivityPerModel.slice(0, 1).map((globalActivity, index) => (
+                      <Card key={index}>
+                        <Title>✨ Activity by Model</Title>
+                        <p className="mb-2 text-gray-500 italic text-[12px]">Upgrade to see analytics for all models</p>
+                        <Button variant="primary" className="mb-2">
+                          <a href="https://forms.gle/W3U4PZpJGFHWtHyA9" target="_blank">
+                            Get Free Trial
+                          </a>
+                        </Button>
+                        <Card>
+                        <Title>{globalActivity.model}</Title>
+                        <Grid numItems={2}>
+                          <Col>
+                            <Subtitle
+                              style={{
+                                fontSize: "15px",
+                                fontWeight: "normal",
+                                color: "#535452",
+                              }}
+                            >
+                              API Requests {valueFormatterNumbers(globalActivity.sum_api_requests)}
+                            </Subtitle>
+                            <AreaChart
+                              className="h-40"
+                              data={globalActivity.daily_data}
+                              index="date"
+                              colors={['cyan']}
+                              categories={['api_requests']}
+                              valueFormatter={valueFormatterNumbers}
+                              onValueChange={(v) => console.log(v)}
+                            />
+                          </Col>
+                          <Col>
+                            <Subtitle
+                              style={{
+                                fontSize: "15px",
+                                fontWeight: "normal",
+                                color: "#535452",
+                              }}
+                            >
+                              Tokens {valueFormatterNumbers(globalActivity.sum_total_tokens)}
+                            </Subtitle>
+                            <BarChart
+                              className="h-40"
+                              data={globalActivity.daily_data}
+                              index="date"
+                              colors={['cyan']}
+                              valueFormatter={valueFormatterNumbers}
+                              categories={['total_tokens']}
+                              onValueChange={(v) => console.log(v)}
+                            />
+                          </Col>
+                          
+                        </Grid>
+                        </Card>
+                      </Card>
+                    ))}
+                </>
+                }              
+              </Grid>
+            </TabPanel>
+            </TabPanels>
+            </TabGroup>
+
             </TabPanel>
             <TabPanel>
             <Grid numItems={2} className="gap-2 h-[75vh] w-full">
@@ -428,6 +661,7 @@ const UsagePage: React.FC<UsagePageProps> = ({
               <Title>Total Spend Per Team</Title>
                 <BarList
                   data={totalSpendPerTeam}
+                  
                 />
               </Card>
               <Card>
@@ -439,9 +673,7 @@ const UsagePage: React.FC<UsagePageProps> = ({
                   showLegend={true}
                   index="date"
                   categories={uniqueTeamIds}
-                  yAxisWidth={80}
-                  colors={["blue", "green", "yellow", "red", "purple"]}
-                  
+                  yAxisWidth={80}                  
                   stack={true}
                 />
               </Card>
@@ -451,40 +683,192 @@ const UsagePage: React.FC<UsagePageProps> = ({
             </Grid>
             </TabPanel>
             <TabPanel>
+            <p className="mb-2 text-gray-500 italic text-[12px]">Customers of your LLM API calls. Tracked when a `user` param is passed in your LLM calls <a className="text-blue-500" href="https://docs.litellm.ai/docs/proxy/users" target="_blank">docs here</a></p>
+              <Grid numItems={2}>
+                <Col>
+                <Text>Select Time Range</Text>
+       
+              <DateRangePicker 
+                  enableSelect={true} 
+                  value={dateValue} 
+                  onValueChange={(value) => {
+                    setDateValue(value);
+                    updateEndUserData(value.from, value.to, null); // Call updateModelMetrics with the new date range
+                  }}
+                />
+                         </Col>
+                         <Col>
+                  <Text>Select Key</Text>
+                  <Select defaultValue="all-keys">
+                  <SelectItem
+                    key="all-keys"
+                    value="all-keys"
+                    onClick={() => {
+                      updateEndUserData(dateValue.from, dateValue.to, null);
+                    }}
+                  >
+                    All Keys
+                  </SelectItem>
+                    {keys?.map((key: any, index: number) => {
+                      if (
+                        key &&
+                        key["key_alias"] !== null &&
+                        key["key_alias"].length > 0
+                      ) {
+                        return (
+                          
+                          <SelectItem
+                            key={index}
+                            value={String(index)}
+                            onClick={() => {
+                              updateEndUserData(dateValue.from, dateValue.to, key["token"]);
+                            }}
+                          >
+                            {key["key_alias"]}
+                          </SelectItem>
+                        );
+                      }
+                      return null; // Add this line to handle the case when the condition is not met
+                    })}
+                  </Select>
+                  </Col>
+
+              </Grid>
+            
+                
+                
+              <Card className="mt-4">
+
+
+             
+              <Table className="max-h-[70vh] min-h-[500px]">
+                  <TableHead>
+                    <TableRow>
+                      <TableHeaderCell>Customer</TableHeaderCell>
+                      <TableHeaderCell>Spend</TableHeaderCell>
+                      <TableHeaderCell>Total Events</TableHeaderCell>
+                    </TableRow>
+                  </TableHead>
+
+                  <TableBody>
+                    {topUsers?.map((user: any, index: number) => (
+                      <TableRow key={index}>
+                        <TableCell>{user.end_user}</TableCell>
+                        <TableCell>{user.total_spend?.toFixed(4)}</TableCell>
+                        <TableCell>{user.total_count}</TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+
+              </Card>
+
+            </TabPanel>
+            <TabPanel>
+              <Grid numItems={2}>
+              <Col numColSpan={1}>
+            <DateRangePicker 
+                  className="mb-4"
+                  enableSelect={true} 
+                  value={dateValue} 
+                  onValueChange={(value) => {
+                    setDateValue(value);
+                    updateTagSpendData(value.from, value.to); // Call updateModelMetrics with the new date range
+                  }}
+              />
+
+              </Col>
+
+              <Col>
+                  {
+                    premiumUser ? (
+                      <div>
+                        <MultiSelect
+                            value={selectedTags}
+                            onValueChange={(value) => setSelectedTags(value as string[])}
+                          >
+                        <MultiSelectItem
+                          key={"all-tags"}
+                          value={"all-tags"}
+                          onClick={() => setSelectedTags(["all-tags"])}
+                        >
+                          All Tags
+                        </MultiSelectItem>
+                        {allTagNames &&
+                          allTagNames
+                            .filter((tag) => tag !== "all-tags")
+                            .map((tag: any, index: number) => {
+                              return (
+                                <MultiSelectItem
+                                  key={tag}
+                                  value={String(tag)}
+                                >
+                                  {tag}
+                                </MultiSelectItem>
+                              );
+                            })}
+                      </MultiSelect>
+
+                      </div>
+
+                    ) : (
+                      <div>
+
+<MultiSelect
+                            value={selectedTags}
+                            onValueChange={(value) => setSelectedTags(value as string[])}
+                          >
+                        <MultiSelectItem
+                          key={"all-tags"}
+                          value={"all-tags"}
+                          onClick={() => setSelectedTags(["all-tags"])}
+                        >
+                          All Tags
+                        </MultiSelectItem>
+                        {allTagNames &&
+                          allTagNames
+                            .filter((tag) => tag !== "all-tags")
+                            .map((tag: any, index: number) => {
+                              return (
+                                <SelectItem
+                                  key={tag}
+                                  value={String(tag)}
+                                  // @ts-ignore
+                                  disabled={true} 
+                                >
+                                  ✨ {tag} (Enterprise only Feature)
+                                </SelectItem>
+                              );
+                            })}
+                      </MultiSelect>
+
+
+
+
+                      </div>
+                    )
+                  }
+  
+              </Col>
+
+              </Grid>
             <Grid numItems={2} className="gap-2 h-[75vh] w-full mb-4">
-            <Col numColSpan={2}>
+            
+
+              <Col numColSpan={2}>
 
               <Card>
-              <Title>Spend Per Tag - Last 30 Days</Title>
-              <Text>Get Started Tracking cost per tag <a href="https://docs.litellm.ai/docs/proxy/enterprise#tracking-spend-for-custom-tags" target="_blank">here</a></Text>
-              <Table>
-                <TableHead>
-                  <TableRow>
-                    <TableHeaderCell>Tag</TableHeaderCell>
-                    <TableHeaderCell>Spend</TableHeaderCell>
-                    <TableHeaderCell>Requests</TableHeaderCell>
-                  </TableRow>
-                </TableHead>
-                <TableBody>
-                  {topTagsData.map((tag) => (
-                    <TableRow key={tag.name}>
-                      <TableCell>{tag.name}</TableCell>
-                      <TableCell>{tag.value}</TableCell>
-                      <TableCell>{tag.log_count}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-                {/* <BarChart
-                  className="h-72"
-                  data={teamSpendData}
-                  showLegend={true}
-                  index="date"
-                  categories={uniqueTeamIds}
-                  yAxisWidth={80}
-                  
-                  stack={true}
-                /> */}
+              <Title>Spend Per Tag</Title>
+              <Text>Get Started Tracking cost per tag <a className="text-blue-500" href="https://docs.litellm.ai/docs/proxy/cost_tracking" target="_blank">here</a></Text>
+             <BarChart
+              className="h-72"
+              data={topTagsData}
+              index="name"
+              categories={["spend"]}
+              colors={["blue"]}
+             >
+
+             </BarChart>
               </Card>
               </Col>
               <Col numColSpan={2}>
@@ -492,60 +876,6 @@ const UsagePage: React.FC<UsagePageProps> = ({
             </Grid>
             </TabPanel>
             
-            <TabPanel>
-              <Title>Filter By Model Group</Title>
-              <p style={{fontSize: '0.85rem', color: '#808080'}}>View how requests were load balanced within a model group</p>
-              <p style={{fontSize: '0.85rem', color: '#808080', fontStyle: 'italic'}}>(Beta feature) only supported for Azure Model Groups</p>
-
-
-            <Select
-              className="mb-4 mt-2"
-              defaultValue="all"
-            >
-              <SelectItem 
-                  value={"all"}
-                  onClick={() => updateModelMetrics(null)}
-                >
-                  All Model Groups
-                </SelectItem>
-              {modelGroups.map((group, idx) => (
-                <SelectItem 
-                  key={idx} 
-                  value={group}
-                  onClick={() => updateModelMetrics(group)}
-                >
-                  {group}
-                </SelectItem>
-              ))}
-            </Select>
-            <Card>
-          <Title>Number Requests per Model</Title>
-              <BarChart
-                data={modelMetrics}
-                className="h-[50vh]"
-                index="model"
-                categories={["num_requests"]}
-                colors={["blue"]}
-                yAxisWidth={400}
-                layout="vertical"
-                tickGap={5}
-              />
-        </Card>
-        <Card className="mt-4">
-          <Title>Latency Per Model</Title>
-              <BarChart
-                data={modelLatencyMetrics}
-                className="h-[50vh]"
-                index="model"
-                categories={["avg_latency_seconds"]}
-                colors={["red"]}
-                yAxisWidth={400}
-                layout="vertical"
-                tickGap={5}
-              />
-        </Card>
-
-            </TabPanel>
         </TabPanels>
       </TabGroup>
     </div>

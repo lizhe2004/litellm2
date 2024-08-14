@@ -1,14 +1,18 @@
 #### What this tests ####
 #    This tests setting rules before / after making llm api calls
-import sys, os, time
-import traceback, asyncio
+import asyncio
+import os
+import sys
+import time
+import traceback
+
 import pytest
 
 sys.path.insert(
     0, os.path.abspath("../..")
 )  # Adds the parent directory to the system path
 import litellm
-from litellm import completion, acompletion
+from litellm import acompletion, completion
 
 
 def my_pre_call_rule(input: str):
@@ -126,18 +130,18 @@ def test_post_call_rule_streaming():
         print("Got exception", e)
         print(type(e))
         print(vars(e))
-        assert (
-            e.message
-            == "OpenAIException - This violates LiteLLM Proxy Rules. Response too short"
-        )
+        assert "This violates LiteLLM Proxy Rules. Response too short" in e.message
 
 
-def test_post_call_processing_error_async_response():
-    response = asyncio.run(
-        acompletion(
+@pytest.mark.asyncio
+async def test_post_call_processing_error_async_response():
+    try:
+        response = await acompletion(
             model="command-nightly",  # Just used as an example
             messages=[{"content": "Hello, how are you?", "role": "user"}],
             api_base="https://openai-proxy.berriai.repl.co",  # Just used as an example
             custom_llm_provider="openai",
         )
-    )
+        pytest.fail("This call should have failed")
+    except Exception as e:
+        pass

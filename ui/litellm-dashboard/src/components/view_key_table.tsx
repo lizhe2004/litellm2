@@ -17,6 +17,7 @@ import {
   DialogPanel,
   Text,
   Title,
+  Subtitle,
   Icon,
   BarChart,
 } from "@tremor/react";
@@ -32,10 +33,12 @@ import {
   Select,
 } from "antd";
 
-import ViewKeySpendReport from "./view_key_spend_report";
-
 const { Option } = Select;
-
+const isLocal = process.env.NODE_ENV === "development";
+const proxyBaseUrl = isLocal ? "http://localhost:4000" : null;
+if (isLocal != true) {
+  console.log = function() {};
+}
 
 interface EditKeyModalProps {
   visible: boolean;
@@ -84,7 +87,6 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
   const [isButtonClicked, setIsButtonClicked] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
   const [keyToDelete, setKeyToDelete] = useState<string | null>(null);
-  const [openDialogId, setOpenDialogId] = React.useState<null | number>(null);
   const [selectedItem, setSelectedItem] = useState<ItemData | null>(null);
   const [spendData, setSpendData] = useState<{ day: string; spend: number }[] | null>(
     null
@@ -92,6 +94,7 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
   const [predictedSpendString, setPredictedSpendString] = useState("");
 
   const [editModalVisible, setEditModalVisible] = useState(false);
+  const [infoDialogVisible, setInfoDialogVisible] = useState(false);
   const [selectedToken, setSelectedToken] = useState<ItemData | null>(null);
   const [userModels, setUserModels] = useState([]);
   const initialKnownTeamIDs: Set<string> = new Set();
@@ -183,11 +186,12 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
                     const errorModels = value.filter((model: string) => (
                       !keyTeam.models.includes(model) && 
                       model !== "all-team-models" && 
-                      model !== "all-proxy-models"
+                      model !== "all-proxy-models" && 
+                      !keyTeam.models.includes("all-proxy-models")
                     ));
                     console.log(`errorModels: ${errorModels}`)
                     if (errorModels.length > 0) {
-                      return Promise.reject(`Some models are not part of the new team\'s models - ${errorModels}`);
+                      return Promise.reject(`Some models are not part of the new team\'s models - ${errorModels}Team models: ${keyTeam.models}`);
                     } else {
                       return Promise.resolve();
                     }
@@ -327,47 +331,6 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
   };
 
 
-
-  // call keySpendLogsCall and set the data
-  const fetchData = async (item: ItemData | null) => {
-    try {
-      if (accessToken == null || item == null) {
-        return;
-      }
-      console.log(`accessToken: ${accessToken}; token: ${item.token}`);
-      const response = await keySpendLogsCall(accessToken, item.token);
-
-      console.log("Response:", response);
-      setSpendData(response);
-
-      // predict spend based on response
-      try {
-        const predictedSpend = await PredictedSpendLogsCall(accessToken, response);
-        console.log("Response2:", predictedSpend);
-
-        // append predictedSpend to data
-        const combinedData = [...response, ...predictedSpend.response];
-        setSpendData(combinedData);
-        setPredictedSpendString(predictedSpend.predicted_spend)
-
-        console.log("Combined Data:", combinedData);
-      } catch (error) {
-        console.error("There was an error fetching the predicted data", error);
-      }
-      
-      // setPredictedSpend(predictedSpend);
-      
-    } catch (error) {
-      console.error("There was an error fetching the data", error);
-    }
-  };
-
-  useEffect(() => {
-      fetchData(selectedItem);
-  }, [selectedItem]);
-
-  
-
   const handleDelete = async (token: any) => {
     console.log("handleDelete:", token);
     if (token.token == null) {
@@ -414,18 +377,11 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
   if (data == null) {
     return;
   }
-
-  // useEffect(() => {
-  //   if (openDialogId !== null && selectedItem !== null) {
-  //     fetchData(selectedItem);
-  //   }
-  // }, [openDialogId, selectedItem]);
-
   console.log("RERENDER TRIGGERED");
   return (
     <div>
     <Card className="w-full mx-auto flex-auto overflow-y-auto max-h-[50vh] mb-4 mt-2">
-      <Table className="mt-5">
+      <Table className="mt-5 max-h-[300px] min-h-[300px]">
         <TableHead>
           <TableRow>
             <TableHeaderCell>Key Alias</TableHeaderCell>
@@ -563,25 +519,27 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
                 <TableCell>
                     <Icon
                       onClick={() => {
-                        setSelectedItem(item);
-                        setOpenDialogId(item.id);
+                        setSelectedToken(item);
+                        setInfoDialogVisible(true);
                       }}
                       icon={InformationCircleIcon}
                       size="sm"
                     />
+                    
                 
-                <Dialog
-  open={openDialogId !== null}
-  onClose={() => {
-    setOpenDialogId(null);
-    setSelectedItem(null);
-  }}
+    <Modal
+      open={infoDialogVisible}
+      onCancel={() => {
+        setInfoDialogVisible(false);
+        setSelectedToken(null);
+      }}
+      footer={null}
+      width={800}
+    >
 
->
-  <DialogPanel>
-    {selectedItem && (
+    {selectedToken && (
       <>
-      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3 mt-8">
           <Card>
             <p className="text-tremor-default font-medium text-tremor-content dark:text-dark-tremor-content">
               Spend
@@ -590,9 +548,9 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
               <p className="text-tremor font-semibold text-tremor-content-strong dark:text-dark-tremor-content-strong">
               {(() => {
                       try {
-                        return parseFloat(selectedItem.spend).toFixed(4);
+                        return parseFloat(selectedToken.spend).toFixed(4);
                       } catch (error) {
-                        return selectedItem.spend;
+                        return selectedToken.spend;
                       }
                     })()}
 
@@ -605,8 +563,8 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
             </p>
             <div className="mt-2 flex items-baseline space-x-2.5">
               <p className="text-tremor font-semibold text-tremor-content-strong dark:text-dark-tremor-content-strong">
-              {selectedItem.max_budget != null ? (
-                  <>{selectedItem.max_budget}</>
+              {selectedToken.max_budget != null ? (
+                  <>{selectedToken.max_budget}</>
                 ) : (
                   <>Unlimited</>
                 )}
@@ -619,9 +577,9 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
             </p>
             <div className="mt-2 flex items-baseline space-x-2.5">
               <p className="text-tremor-default font-small text-tremor-content-strong dark:text-dark-tremor-content-strong">
-              {selectedItem.expires != null ? (
+              {selectedToken.expires != null ? (
                   <>
-                  {new Date(selectedItem.expires).toLocaleString(undefined, {
+                  {new Date(selectedToken.expires).toLocaleString(undefined, {
                     day: 'numeric',
                     month: 'long',
                     year: 'numeric',
@@ -638,38 +596,28 @@ const ViewKeyTable: React.FC<ViewKeyTableProps> = ({
           </Card>
       </div>
 
-        <Card className="mt-6 mb-6">
-          {spendData && (
-            <BarChart
-              className="mt-6"
-              data={spendData}
-              colors={["blue", "amber"]}
-              index="date"
-              categories={["spend", "predicted_spend"]}
-              yAxisWidth={80}
-            />
-          )}
-        </Card>
-
+      <Card className="my-4">
+        <Title>Token Name</Title>
+        <Text className="my-1">{selectedToken.key_alias ? selectedToken.key_alias : selectedToken.key_name}</Text>
+        <Title>Token ID</Title>
+        <Text className="my-1 text-[12px]">{selectedToken.token}</Text>              
         <Title>Metadata</Title>
-
-        <Text>{JSON.stringify(selectedItem.metadata)}</Text>
-
+        <Text className="my-1"><pre>{JSON.stringify(selectedToken.metadata)} </pre></Text>
+      </Card>
 
         <Button
-          variant="light"
           className="mx-auto flex items-center"
           onClick={() => {
-            setOpenDialogId(null);
-            setSelectedItem(null);
+            setInfoDialogVisible(false);
+            setSelectedToken(null);
           }}
         >
           Close
         </Button>
       </>
     )}
-</DialogPanel>
-</Dialog>
+
+</Modal>
                   <Icon
                     icon={PencilAltIcon}
                     size="sm"

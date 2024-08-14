@@ -1,10 +1,36 @@
 # Secret Manager
 LiteLLM supports reading secrets from Azure Key Vault and Infisical
 
+- AWS Key Managemenet Service
+- AWS Secret Manager
 - [Azure Key Vault](#azure-key-vault)
 - Google Key Management Service
 - [Infisical Secret Manager](#infisical-secret-manager)
 - [.env Files](#env-files)
+
+## AWS Key Management V1
+
+:::tip
+
+[BETA] AWS Key Management v2 is on the enterprise tier. Go [here for docs](./proxy/enterprise.md#beta-aws-key-manager---key-decryption)
+
+:::
+
+Use AWS KMS to storing a hashed copy of your Proxy Master Key in the environment. 
+
+```bash
+export LITELLM_MASTER_KEY="djZ9xjVaZ..." # 👈 ENCRYPTED KEY
+export AWS_REGION_NAME="us-west-2"
+```
+
+```yaml
+general_settings:
+  key_management_system: "aws_kms"
+  key_management_settings:
+    hosted_keys: ["LITELLM_MASTER_KEY"] # 👈 WHICH KEYS ARE STORED ON KMS
+```
+
+[**See Decryption Code**](https://github.com/BerriAI/litellm/blob/a2da2a8f168d45648b61279d4795d647d94f90c9/litellm/utils.py#L10182)
 
 ## AWS Secret Manager
 
@@ -35,7 +61,7 @@ litellm --config /path/to/config.yaml
 ```
 
 ## Azure Key Vault
-
+<!-- 
 ### Quick Start
 
 ```python 
@@ -62,9 +88,9 @@ import litellm
 litellm.secret_manager = client
 
 litellm.get_secret("your-test-key")
-```
+``` -->
 
-### Usage with OpenAI Proxy Server
+### Usage with LiteLLM Proxy Server
 
 1. Install Proxy dependencies 
 ```bash
@@ -103,7 +129,7 @@ litellm --config /path/to/config.yaml
 
 Use encrypted keys from Google KMS on the proxy
 
-### Usage with OpenAI Proxy Server
+### Usage with LiteLLM Proxy Server
 
 ## Step 1. Add keys to env 
 ```
@@ -134,29 +160,6 @@ $ litellm --test
 
 [Quick Test Proxy](./proxy/quick_start#using-litellm-proxy---curl-request-openai-package-langchain-langchain-js)
 
-
-## Infisical Secret Manager
-Integrates with [Infisical's Secret Manager](https://infisical.com/) for secure storage and retrieval of API keys and sensitive data.
-
-### Usage
-liteLLM manages reading in your LLM API secrets/env variables from Infisical for you
-
-```python
-import litellm
-from infisical import InfisicalClient
-
-litellm.secret_manager = InfisicalClient(token="your-token")
-
-messages = [
-    {"role": "system", "content": "You are a helpful assistant."},
-    {"role": "user", "content": "What's the weather like today?"},
-]
-
-response = litellm.completion(model="gpt-3.5-turbo", messages=messages)
-
-print(response)
-```
-
-
+<!-- 
 ## .env Files
-If no secret manager client is specified, Litellm automatically uses the `.env` file to manage sensitive data.
+If no secret manager client is specified, Litellm automatically uses the `.env` file to manage sensitive data. -->

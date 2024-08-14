@@ -2,10 +2,16 @@
         🚅 LiteLLM
     </h1>
     <p align="center">
-        <p align="center">Call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, etc.]
+        <p align="center">
+        <a href="https://render.com/deploy?repo=https://github.com/BerriAI/litellm" target="_blank" rel="nofollow"><img src="https://render.com/images/deploy-to-render-button.svg" alt="Deploy to Render"></a>
+        <a href="https://railway.app/template/HLP0Ub?referralCode=jch2ME">
+          <img src="https://railway.app/button.svg" alt="Deploy on Railway">
+        </a>
+        </p>
+        <p align="center">Call all LLM APIs using the OpenAI format [Bedrock, Huggingface, VertexAI, TogetherAI, Azure, OpenAI, Groq etc.]
         <br>
     </p>
-<h4 align="center"><a href="https://docs.litellm.ai/docs/simple_proxy" target="_blank">OpenAI Proxy Server</a> | <a href="https://docs.litellm.ai/docs/hosted" target="_blank"> Hosted Proxy (Preview)</a> | <a href="https://docs.litellm.ai/docs/enterprise"target="_blank">Enterprise Tier</a></h4>
+<h4 align="center"><a href="https://docs.litellm.ai/docs/simple_proxy" target="_blank">LiteLLM Proxy Server (LLM Gateway)</a> | <a href="https://docs.litellm.ai/docs/hosted" target="_blank"> Hosted Proxy (Preview)</a> | <a href="https://docs.litellm.ai/docs/enterprise"target="_blank">Enterprise Tier</a></h4>
 <h4 align="center">
     <a href="https://pypi.org/project/litellm/" target="_blank">
         <img src="https://img.shields.io/pypi/v/litellm.svg" alt="PyPI Version">
@@ -29,19 +35,20 @@ LiteLLM manages:
 - Translate inputs to provider's `completion`, `embedding`, and `image_generation` endpoints
 - [Consistent output](https://docs.litellm.ai/docs/completion/output), text responses will always be available at `['choices'][0]['message']['content']`
 - Retry/fallback logic across multiple deployments (e.g. Azure/OpenAI) - [Router](https://docs.litellm.ai/docs/routing)
-- Set Budgets & Rate limits per project, api key, model [OpenAI Proxy Server](https://docs.litellm.ai/docs/simple_proxy)
+- Set Budgets & Rate limits per project, api key, model [LiteLLM Proxy Server (LLM Gateway)](https://docs.litellm.ai/docs/simple_proxy)
 
-[**Jump to OpenAI Proxy Docs**](https://github.com/BerriAI/litellm?tab=readme-ov-file#openai-proxy---docs) <br>
+[**Jump to LiteLLM Proxy (LLM Gateway) Docs**](https://github.com/BerriAI/litellm?tab=readme-ov-file#openai-proxy---docs) <br>
 [**Jump to Supported LLM Providers**](https://github.com/BerriAI/litellm?tab=readme-ov-file#supported-providers-docs)
 
-🚨 **Stable Release:** Use docker images with: `main-stable` tag. These run through 12 hr load tests (1k req./min). 
+🚨 **Stable Release:** Use docker images with the `-stable` tag. These have undergone 12 hour load tests, before being published. 
 
 Support for more providers. Missing a provider or LLM Platform, raise a [feature request](https://github.com/BerriAI/litellm/issues/new?assignees=&labels=enhancement&projects=&template=feature_request.yml&title=%5BFeature%5D%3A+).
 
 # Usage ([**Docs**](https://docs.litellm.ai/docs/))
 
 > [!IMPORTANT]
-> LiteLLM v1.0.0 now requires `openai>=1.0.0`. Migration guide [here](https://docs.litellm.ai/docs/migration)
+> LiteLLM v1.0.0 now requires `openai>=1.0.0`. Migration guide [here](https://docs.litellm.ai/docs/migration)  
+> LiteLLM v1.40.14+ now requires `pydantic>=2.0.0`. No changes required.
 
 <a target="_blank" href="https://colab.research.google.com/github/BerriAI/litellm/blob/main/cookbook/liteLLM_Getting_Started.ipynb">
   <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
@@ -113,6 +120,7 @@ from litellm import completion
 
 ## set env variables for logging tools
 os.environ["LUNARY_PUBLIC_KEY"] = "your-lunary-public-key"
+os.environ["HELICONE_API_KEY"] = "your-helicone-auth-key"
 os.environ["LANGFUSE_PUBLIC_KEY"] = ""
 os.environ["LANGFUSE_SECRET_KEY"] = ""
 os.environ["ATHINA_API_KEY"] = "your-athina-api-key"
@@ -120,13 +128,13 @@ os.environ["ATHINA_API_KEY"] = "your-athina-api-key"
 os.environ["OPENAI_API_KEY"]
 
 # set callbacks
-litellm.success_callback = ["lunary", "langfuse", "athina"] # log input/output to lunary, langfuse, supabase, athina etc
+litellm.success_callback = ["lunary", "langfuse", "athina", "helicone"] # log input/output to lunary, langfuse, supabase, athina, helicone etc
 
 #openai call
 response = completion(model="gpt-3.5-turbo", messages=[{"role": "user", "content": "Hi 👋 - i'm openai"}])
 ```
 
-# OpenAI Proxy - ([Docs](https://docs.litellm.ai/docs/simple_proxy))
+# LiteLLM Proxy Server (LLM Gateway) - ([Docs](https://docs.litellm.ai/docs/simple_proxy))
 
 Track spend + Load Balance across multiple projects
 
@@ -140,6 +148,7 @@ The proxy provides:
 4. [Rate Limiting](https://docs.litellm.ai/docs/proxy/users#set-rate-limits)
 
 ## 📖 Proxy Endpoints - [Swagger Docs](https://litellm-api.up.railway.app/)
+
 
 ## Quick Start Proxy - CLI
 
@@ -157,6 +166,10 @@ $ litellm --model huggingface/bigcode/starcoder
 
 ### Step 2: Make ChatCompletions Request to Proxy
 
+
+> [!IMPORTANT]
+> 💡 [Use LiteLLM Proxy with Langchain (Python, JS), OpenAI SDK (Python, JS) Anthropic SDK, Mistral SDK, LlamaIndex, Instructor, Curl](https://docs.litellm.ai/docs/proxy/user_keys)  
+
 ```python
 import openai # openai v1.0.0+
 client = openai.OpenAI(api_key="anything",base_url="http://0.0.0.0:4000") # set proxy to base_url
@@ -172,6 +185,31 @@ print(response)
 ```
 
 ## Proxy Key Management ([Docs](https://docs.litellm.ai/docs/proxy/virtual_keys))
+
+Connect the proxy with a Postgres DB to create proxy keys
+
+```bash
+# Get the code
+git clone https://github.com/BerriAI/litellm
+
+# Go to folder
+cd litellm
+
+# Add the master key - you can change this after setup
+echo 'LITELLM_MASTER_KEY="sk-1234"' > .env
+
+# Add the litellm salt key - you cannot change this after adding a model
+# It is used to encrypt / decrypt your LLM API Key credentials
+# We recommned - https://1password.com/password-generator/ 
+# password generator to get a random hash for litellm salt key
+echo 'LITELLM_SALT_KEY="sk-1234"' > .env
+
+source .env
+
+# Start
+docker-compose up
+```
+
 
 UI on `/ui` on your proxy server
 ![ui_3](https://github.com/BerriAI/litellm/assets/29436595/47c97d5e-b9be-4839-b28c-43d7f4f10033)
@@ -200,35 +238,39 @@ curl 'http://0.0.0.0:4000/key/generate' \
 ## Supported Providers ([Docs](https://docs.litellm.ai/docs/providers))
 
 | Provider                                                                            | [Completion](https://docs.litellm.ai/docs/#basic-usage) | [Streaming](https://docs.litellm.ai/docs/completion/stream#streaming-responses) | [Async Completion](https://docs.litellm.ai/docs/completion/stream#async-completion) | [Async Streaming](https://docs.litellm.ai/docs/completion/stream#async-streaming) | [Async Embedding](https://docs.litellm.ai/docs/embedding/supported_embedding) | [Async Image Generation](https://docs.litellm.ai/docs/image_generation) |
-| ----------------------------------------------------------------------------------- | ------------------------------------------------------- | ------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
-| [openai](https://docs.litellm.ai/docs/providers/openai)                             | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            | ✅                                                                      |
-| [azure](https://docs.litellm.ai/docs/providers/azure)                               | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            | ✅                                                                      |
-| [aws - sagemaker](https://docs.litellm.ai/docs/providers/aws_sagemaker)             | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            |
-| [aws - bedrock](https://docs.litellm.ai/docs/providers/bedrock)                     | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            |
-| [google - vertex_ai [Gemini]](https://docs.litellm.ai/docs/providers/vertex)        | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [google - palm](https://docs.litellm.ai/docs/providers/palm)                        | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [google AI Studio - gemini](https://docs.litellm.ai/docs/providers/gemini)          | ✅                                                      |       ✅                                                                          | ✅                                                                                  |     ✅                                                                              |                                                                               |
-| [mistral ai api](https://docs.litellm.ai/docs/providers/mistral)                    | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            |
-| [cloudflare AI Workers](https://docs.litellm.ai/docs/providers/cloudflare_workers)  | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [cohere](https://docs.litellm.ai/docs/providers/cohere)                             | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            |
-| [anthropic](https://docs.litellm.ai/docs/providers/anthropic)                       | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [huggingface](https://docs.litellm.ai/docs/providers/huggingface)                   | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            |
-| [replicate](https://docs.litellm.ai/docs/providers/replicate)                       | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [together_ai](https://docs.litellm.ai/docs/providers/togetherai)                    | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [openrouter](https://docs.litellm.ai/docs/providers/openrouter)                     | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [ai21](https://docs.litellm.ai/docs/providers/ai21)                                 | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [baseten](https://docs.litellm.ai/docs/providers/baseten)                           | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [vllm](https://docs.litellm.ai/docs/providers/vllm)                                 | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [nlp_cloud](https://docs.litellm.ai/docs/providers/nlp_cloud)                       | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [aleph alpha](https://docs.litellm.ai/docs/providers/aleph_alpha)                   | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [petals](https://docs.litellm.ai/docs/providers/petals)                             | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [ollama](https://docs.litellm.ai/docs/providers/ollama)                             | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                | ✅                                                                            |
-| [deepinfra](https://docs.litellm.ai/docs/providers/deepinfra)                       | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [perplexity-ai](https://docs.litellm.ai/docs/providers/perplexity)                  | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [Groq AI](https://docs.litellm.ai/docs/providers/groq)                              | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [anyscale](https://docs.litellm.ai/docs/providers/anyscale)                         | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
-| [voyage ai](https://docs.litellm.ai/docs/providers/voyage)                          |                                                         |                                                                                 |                                                                                     |                                                                                   | ✅                                                                            |
-| [xinference [Xorbits Inference]](https://docs.litellm.ai/docs/providers/xinference) |                                                         |                                                                                 |                                                                                     |                                                                                   | ✅                                                                            |
+|-------------------------------------------------------------------------------------|---------------------------------------------------------|---------------------------------------------------------------------------------|-------------------------------------------------------------------------------------|-----------------------------------------------------------------------------------|-------------------------------------------------------------------------------|-------------------------------------------------------------------------|
+| [openai](https://docs.litellm.ai/docs/providers/openai)                             | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             | ✅                                                                       |
+| [azure](https://docs.litellm.ai/docs/providers/azure)                               | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             | ✅                                                                       |
+| [aws - sagemaker](https://docs.litellm.ai/docs/providers/aws_sagemaker)             | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             |                                                                         |
+| [aws - bedrock](https://docs.litellm.ai/docs/providers/bedrock)                     | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             |                                                                         |
+| [google - vertex_ai](https://docs.litellm.ai/docs/providers/vertex)                 | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             | ✅                                                                       |
+| [google - palm](https://docs.litellm.ai/docs/providers/palm)                        | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [google AI Studio - gemini](https://docs.litellm.ai/docs/providers/gemini)          | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [mistral ai api](https://docs.litellm.ai/docs/providers/mistral)                    | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             |                                                                         |
+| [cloudflare AI Workers](https://docs.litellm.ai/docs/providers/cloudflare_workers)  | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [cohere](https://docs.litellm.ai/docs/providers/cohere)                             | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             |                                                                         |
+| [anthropic](https://docs.litellm.ai/docs/providers/anthropic)                       | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [empower](https://docs.litellm.ai/docs/providers/empower)                    | ✅                                                      | ✅                                                                              | ✅                                                                                  | ✅                                                                                |
+| [huggingface](https://docs.litellm.ai/docs/providers/huggingface)                   | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             |                                                                         |
+| [replicate](https://docs.litellm.ai/docs/providers/replicate)                       | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [together_ai](https://docs.litellm.ai/docs/providers/togetherai)                    | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [openrouter](https://docs.litellm.ai/docs/providers/openrouter)                     | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [ai21](https://docs.litellm.ai/docs/providers/ai21)                                 | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [baseten](https://docs.litellm.ai/docs/providers/baseten)                           | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [vllm](https://docs.litellm.ai/docs/providers/vllm)                                 | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [nlp_cloud](https://docs.litellm.ai/docs/providers/nlp_cloud)                       | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [aleph alpha](https://docs.litellm.ai/docs/providers/aleph_alpha)                   | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [petals](https://docs.litellm.ai/docs/providers/petals)                             | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [ollama](https://docs.litellm.ai/docs/providers/ollama)                             | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             |                                                                         |
+| [deepinfra](https://docs.litellm.ai/docs/providers/deepinfra)                       | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [perplexity-ai](https://docs.litellm.ai/docs/providers/perplexity)                  | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [Groq AI](https://docs.litellm.ai/docs/providers/groq)                              | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [Deepseek](https://docs.litellm.ai/docs/providers/deepseek)                         | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [anyscale](https://docs.litellm.ai/docs/providers/anyscale)                         | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
+| [IBM - watsonx.ai](https://docs.litellm.ai/docs/providers/watsonx)                  | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 | ✅                                                                             |                                                                         |
+| [voyage ai](https://docs.litellm.ai/docs/providers/voyage)                          |                                                         |                                                                                 |                                                                                     |                                                                                   | ✅                                                                             |                                                                         |
+| [xinference [Xorbits Inference]](https://docs.litellm.ai/docs/providers/xinference) |                                                         |                                                                                 |                                                                                     |                                                                                   | ✅                                                                             |                                                                         |
+| [FriendliAI](https://docs.litellm.ai/docs/providers/friendliai)                              | ✅                                                       | ✅                                                                               | ✅                                                                                   | ✅                                                                                 |                                                                               |                                                                         |
 
 [**Read the Docs**](https://docs.litellm.ai/docs/)
 
@@ -247,7 +289,7 @@ Step 2: Navigate into the project, and install dependencies:
 
 ```
 cd litellm
-poetry install
+poetry install -E extra_proxy -E proxy
 ```
 
 Step 3: Test your change:

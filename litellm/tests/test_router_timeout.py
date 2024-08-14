@@ -1,8 +1,12 @@
 #### What this tests ####
 # This tests if the router timeout error handling during fallbacks
 
-import sys, os, time
-import traceback, asyncio
+import asyncio
+import os
+import sys
+import time
+import traceback
+
 import pytest
 
 sys.path.insert(
@@ -12,9 +16,10 @@ sys.path.insert(
 
 import os
 
+from dotenv import load_dotenv
+
 import litellm
 from litellm import Router
-from dotenv import load_dotenv
 
 load_dotenv()
 
@@ -37,6 +42,7 @@ def test_router_timeouts():
             "litellm_params": {
                 "model": "claude-instant-1.2",
                 "api_key": "os.environ/ANTHROPIC_API_KEY",
+                "mock_response": "hello world",
             },
             "tpm": 20000,
         },
@@ -57,6 +63,7 @@ def test_router_timeouts():
         redis_password=os.getenv("REDIS_PASSWORD"),
         redis_port=int(os.getenv("REDIS_PORT")),
         timeout=10,
+        num_retries=0,
     )
 
     print("***** TPM SETTINGS *****")
@@ -89,15 +96,17 @@ def test_router_timeouts():
 
 @pytest.mark.asyncio
 async def test_router_timeouts_bedrock():
+    import uuid
+
     import openai
 
     # Model list for OpenAI and Anthropic models
-    model_list = [
+    _model_list = [
         {
             "model_name": "bedrock",
             "litellm_params": {
                 "model": "bedrock/anthropic.claude-instant-v1",
-                "timeout": 0.001,
+                "timeout": 0.00001,
             },
             "tpm": 80000,
         },
@@ -105,17 +114,18 @@ async def test_router_timeouts_bedrock():
 
     # Configure router
     router = Router(
-        model_list=model_list,
+        model_list=_model_list,
         routing_strategy="usage-based-routing",
         debug_level="DEBUG",
         set_verbose=True,
+        num_retries=0,
     )
 
     litellm.set_verbose = True
     try:
         response = await router.acompletion(
             model="bedrock",
-            messages=[{"role": "user", "content": "hello, who are u"}],
+            messages=[{"role": "user", "content": f"hello, who are u {uuid.uuid4()}"}],
         )
         print(response)
         pytest.fail("Did not raise error `openai.APITimeoutError`")

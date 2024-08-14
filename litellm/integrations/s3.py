@@ -1,13 +1,14 @@
 #### What this does ####
 #    On success + failure, log events to Supabase
 
-import dotenv, os
-import requests
-
-dotenv.load_dotenv()  # Loading env variables using dotenv
+import datetime
+import os
+import subprocess
+import sys
 import traceback
-import datetime, subprocess, sys
-import litellm, uuid
+import uuid
+
+import litellm
 from litellm._logging import print_verbose, verbose_logger
 
 
@@ -57,6 +58,7 @@ class S3Logger:
                     "s3_aws_session_token"
                 )
                 s3_config = litellm.s3_callback_params.get("s3_config")
+                s3_path = litellm.s3_callback_params.get("s3_path")
                 # done reading litellm.s3_callback_params
 
             self.bucket_name = s3_bucket_name
@@ -183,6 +185,5 @@ class S3Logger:
             print_verbose(f"s3 Layer Logging - final response object: {response_obj}")
             return response
         except Exception as e:
-            traceback.print_exc()
             verbose_logger.debug(f"s3 Layer Error - {str(e)}\n{traceback.format_exc()}")
             pass

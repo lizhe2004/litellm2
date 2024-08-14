@@ -2,10 +2,9 @@ import Image from '@theme/IdealImage';
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# [BETA] Proxy UI 
-### **Create + delete keys through a UI**
+# [BETA] UI - Admin 
 
-[Let users create their own keys](#setup-ssoauth-for-ui)
+Create keys, track spend, add models without worrying about the config / CRUD endpoints.
 
 :::info
 
@@ -54,6 +53,12 @@ UI_PASSWORD=langchain        # password to sign in on UI
 
 On accessing the LiteLLM UI, you will be prompted to enter your username, password
 
+## Invite-other users 
+
+Allow others to create/delete their own keys. 
+
+[**Go Here**](./self_serve.md)
+
 ## ✨ Enterprise Features
 
 Features here are behind a commercial license in our `/enterprise` folder. [**See Code**](https://github.com/BerriAI/litellm/tree/main/enterprise)
@@ -78,6 +83,28 @@ litellm_settings:
 
 #### Step 2: Setup Oauth Client
 <Tabs>
+<TabItem value="okta" label="Okta SSO">
+
+1. Add Okta credentials to your .env
+
+```bash
+GENERIC_CLIENT_ID = "<your-okta-client-id>"
+GENERIC_CLIENT_SECRET = "<your-okta-client-secret>" 
+GENERIC_AUTHORIZATION_ENDPOINT = "<your-okta-domain>/authorize" # https://dev-2kqkcd6lx6kdkuzt.us.auth0.com/authorize
+GENERIC_TOKEN_ENDPOINT = "<your-okta-domain>/token" # https://dev-2kqkcd6lx6kdkuzt.us.auth0.com/oauth/token
+GENERIC_USERINFO_ENDPOINT = "<your-okta-domain>/userinfo" # https://dev-2kqkcd6lx6kdkuzt.us.auth0.com/userinfo
+```
+
+You can get your domain specific auth/token/userinfo endpoints at `<YOUR-OKTA-DOMAIN>/.well-known/openid-configuration`
+
+2. Add proxy url as callback_url on Okta
+
+On Okta, add the 'callback_url' as `<proxy_base_url>/sso/callback`
+
+
+<Image img={require('../../img/okta_callback_url.png')} />
+
+</TabItem>
 <TabItem value="google" label="Google SSO">
 
 - Create a new Oauth 2.0 Client on https://console.cloud.google.com/ 
@@ -115,7 +142,6 @@ MICROSOFT_TENANT="5a39737
     ```
 
 </TabItem>
-
 
 <TabItem value="Generic" label="Generic SSO Provider">
 
@@ -165,6 +191,16 @@ PROXY_BASE_URL=https://litellm-api.up.railway.app/
 
 #### Step 4. Test flow
 <Image img={require('../../img/litellm_ui_3.gif')} />
+
+### Restrict Email Subdomains w/ SSO
+
+If you're using SSO and want to only allow users with a specific subdomain - e.g. (@berri.ai email accounts) to access the UI, do this:
+
+```bash
+export ALLOWED_EMAIL_DOMAINS="berri.ai"
+```
+
+This will check if the user email we receive from SSO contains this domain, before allowing access.
 
 ### Set Admin view w/ SSO 
 
