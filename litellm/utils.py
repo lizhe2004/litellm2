@@ -20,6 +20,7 @@ import datetime, time
 import tiktoken
 import uuid
 import aiohttp
+import textwrap
 import logging
 import asyncio, httpx, inspect
 from inspect import iscoroutine
@@ -28,7 +29,9 @@ from tokenizers import Tokenizer
 from dataclasses import (
     dataclass,
     field,
-)  # for storing API inputs, outputs, and metadata
+)
+
+import litellm._service_logger  # for storing API inputs, outputs, and metadata
 
 try:
     # this works in python 3.8
@@ -68,9 +71,11 @@ from .integrations.custom_logger import CustomLogger
 from .integrations.langfuse import LangFuseLogger
 from .integrations.datadog import DataDogLogger
 from .integrations.prometheus import PrometheusLogger
+from .integrations.prometheus_services import PrometheusServicesLogger
 from .integrations.dynamodb import DyanmoDBLogger
 from .integrations.s3 import S3Logger
 from .integrations.clickhouse import ClickhouseLogger
+from .integrations.greenscale import GreenscaleLogger
 from .integrations.litedebugger import LiteDebugger
 from .proxy._types import KeyManagementSystem
 from openai import OpenAIError as OriginalError
@@ -130,6 +135,7 @@ dynamoLogger = None
 s3Logger = None
 genericAPILogger = None
 clickHouseLogger = None
+greenscaleLogger = None
 lunaryLogger = None
 aispendLogger = None
 berrispendLogger = None
@@ -222,6 +228,24 @@ class Function(OpenAIObject):
     arguments: str
     name: Optional[str] = None
 
+    def __init__(
+        self,
+        arguments: Union[Dict, str],
+        name: Optional[str] = None,
+        **params,
+    ):
+        if isinstance(arguments, Dict):
+            arguments = json.dumps(arguments)
+        else:
+            arguments = arguments
+
+        name = name
+
+        # Build a dictionary with the structure your BaseModel expects
+        data = {"arguments": arguments, "name": name, **params}
+
+        super(Function, self).__init__(**data)
+
 
 class ChatCompletionDeltaToolCall(OpenAIObject):
     id: Optional[str] = None
@@ -236,6 +260,7 @@ class HiddenParams(OpenAIObject):
 
     class Config:
         extra = "allow"
+        protected_namespaces = ()
 
     def get(self, key, default=None):
         # Custom .get() method to access attributes with a default value if the attribute doesn't exist
@@ -605,7 +630,7 @@ class ModelResponse(OpenAIObject):
 
 
 class Embedding(OpenAIObject):
-    embedding: list = []
+    embedding: Union[list, str] = []
     index: int
     object: str
 
@@ -1104,7 +1129,6 @@ class Logging:
                 curl_command = self.model_call_details
 
             # only print verbose if verbose logger is not set
-
             if verbose_logger.level == 0:
                 # this means verbose logger was not switched on - user is in litellm.set_verbose=True
                 print_verbose(f"\033[92m{curl_command}\033[0m\n")
@@ -1722,6 +1746,33 @@ class Logging:
                             user_id=kwargs.get("user", None),
                             print_verbose=print_verbose,
                         )
+                    if callback == "greenscale":
+                        kwargs = {}
+                        for k, v in self.model_call_details.items():
+                            if (
+                                k != "original_response"
+                            ):  # copy.deepcopy raises errors as this could be a coroutine
+                                kwargs[k] = v
+                        # this only logs streaming once, complete_streaming_response exists i.e when stream ends
+                        if self.stream:
+                            verbose_logger.debug(
+                                f"is complete_streaming_response in kwargs: {kwargs.get('complete_streaming_response', None)}"
+                            )
+                            if complete_streaming_response is None:
+                                break
+                            else:
+                                print_verbose(
+                                    "reaches greenscale for streaming logging!"
+                                )
+                                result = kwargs["complete_streaming_response"]
+
+                        greenscaleLogger.log_event(
+                            kwargs=kwargs,
+                            response_obj=result,
+                            start_time=start_time,
+                            end_time=end_time,
+                            print_verbose=print_verbose,
+                        )
                     if callback == "cache" and litellm.cache is not None:
                         # this only logs streaming once, complete_streaming_response exists i.e when stream ends
                         print_verbose("success_callback: reaches cache for logging!")
@@ -1989,9 +2040,6 @@ class Logging:
                             else:
                                 litellm.cache.add_cache(result, **kwargs)
                 if isinstance(callback, CustomLogger):  # custom logger class
-                    print_verbose(
-                        f"Running Async success callback: {callback}; self.stream: {self.stream}; async_complete_streaming_response: {self.model_call_details.get('async_complete_streaming_response', None)} result={result}"
-                    )
                     if self.stream == True:
                         if (
                             "async_complete_streaming_response"
@@ -2230,6 +2278,24 @@ class Logging:
                             level="ERROR",
                             kwargs=self.model_call_details,
                         )
+                    elif callback == "prometheus":
+                        global prometheusLogger
+                        verbose_logger.debug("reaches prometheus for success logging!")
+                        kwargs = {}
+                        for k, v in self.model_call_details.items():
+                            if (
+                                k != "original_response"
+                            ):  # copy.deepcopy raises errors as this could be a coroutine
+                                kwargs[k] = v
+                        kwargs["exception"] = str(exception)
+                        prometheusLogger.log_event(
+                            kwargs=kwargs,
+                            response_obj=result,
+                            start_time=start_time,
+                            end_time=end_time,
+                            user_id=kwargs.get("user", None),
+                            print_verbose=print_verbose,
+                        )
                 except Exception as e:
                     print_verbose(
                         f"LiteLLM.LoggingError: [Non-Blocking] Exception occurred while failure logging with integrations {str(e)}"
@@ -2362,210 +2428,201 @@ class Rules:
 
 ####### CLIENT ###################
 # make it easy to log if completion/embedding runs succeeded or failed + see what happened | Non-Blocking
+def function_setup(
+    original_function, rules_obj, start_time, *args, **kwargs
+):  # just run once to check if user wants to send their data anywhere - PostHog/Sentry/Slack/etc.
+    try:
+        global callback_list, add_breadcrumb, user_logger_fn, Logging
+        function_id = kwargs["id"] if "id" in kwargs else None
+        if len(litellm.callbacks) > 0:
+            for callback in litellm.callbacks:
+                if callback not in litellm.input_callback:
+                    litellm.input_callback.append(callback)
+                if callback not in litellm.success_callback:
+                    litellm.success_callback.append(callback)
+                if callback not in litellm.failure_callback:
+                    litellm.failure_callback.append(callback)
+                if callback not in litellm._async_success_callback:
+                    litellm._async_success_callback.append(callback)
+                if callback not in litellm._async_failure_callback:
+                    litellm._async_failure_callback.append(callback)
+            print_verbose(
+                f"Initialized litellm callbacks, Async Success Callbacks: {litellm._async_success_callback}"
+            )
+        if (
+            len(litellm.input_callback) > 0
+            or len(litellm.success_callback) > 0
+            or len(litellm.failure_callback) > 0
+        ) and len(callback_list) == 0:
+            callback_list = list(
+                set(
+                    litellm.input_callback
+                    + litellm.success_callback
+                    + litellm.failure_callback
+                )
+            )
+            set_callbacks(callback_list=callback_list, function_id=function_id)
+        ## ASYNC CALLBACKS
+        if len(litellm.input_callback) > 0:
+            removed_async_items = []
+            for index, callback in enumerate(litellm.input_callback):
+                if inspect.iscoroutinefunction(callback):
+                    litellm._async_input_callback.append(callback)
+                    removed_async_items.append(index)
+
+            # Pop the async items from input_callback in reverse order to avoid index issues
+            for index in reversed(removed_async_items):
+                litellm.input_callback.pop(index)
+
+        if len(litellm.success_callback) > 0:
+            removed_async_items = []
+            for index, callback in enumerate(litellm.success_callback):
+                if inspect.iscoroutinefunction(callback):
+                    litellm._async_success_callback.append(callback)
+                    removed_async_items.append(index)
+                elif callback == "dynamodb":
+                    # dynamo is an async callback, it's used for the proxy and needs to be async
+                    # we only support async dynamo db logging for acompletion/aembedding since that's used on proxy
+                    litellm._async_success_callback.append(callback)
+                    removed_async_items.append(index)
+
+            # Pop the async items from success_callback in reverse order to avoid index issues
+            for index in reversed(removed_async_items):
+                litellm.success_callback.pop(index)
+
+        if len(litellm.failure_callback) > 0:
+            removed_async_items = []
+            for index, callback in enumerate(litellm.failure_callback):
+                if inspect.iscoroutinefunction(callback):
+                    litellm._async_failure_callback.append(callback)
+                    removed_async_items.append(index)
+
+            # Pop the async items from failure_callback in reverse order to avoid index issues
+            for index in reversed(removed_async_items):
+                litellm.failure_callback.pop(index)
+        ### DYNAMIC CALLBACKS ###
+        dynamic_success_callbacks = None
+        dynamic_async_success_callbacks = None
+        if kwargs.get("success_callback", None) is not None and isinstance(
+            kwargs["success_callback"], list
+        ):
+            removed_async_items = []
+            for index, callback in enumerate(kwargs["success_callback"]):
+                if (
+                    inspect.iscoroutinefunction(callback)
+                    or callback == "dynamodb"
+                    or callback == "s3"
+                ):
+                    if dynamic_async_success_callbacks is not None and isinstance(
+                        dynamic_async_success_callbacks, list
+                    ):
+                        dynamic_async_success_callbacks.append(callback)
+                    else:
+                        dynamic_async_success_callbacks = [callback]
+                    removed_async_items.append(index)
+            # Pop the async items from success_callback in reverse order to avoid index issues
+            for index in reversed(removed_async_items):
+                kwargs["success_callback"].pop(index)
+            dynamic_success_callbacks = kwargs.pop("success_callback")
+
+        if add_breadcrumb:
+            add_breadcrumb(
+                category="litellm.llm_call",
+                message=f"Positional Args: {args}, Keyword Args: {kwargs}",
+                level="info",
+            )
+        if "logger_fn" in kwargs:
+            user_logger_fn = kwargs["logger_fn"]
+        # INIT LOGGER - for user-specified integrations
+        model = args[0] if len(args) > 0 else kwargs.get("model", None)
+        call_type = original_function.__name__
+        if (
+            call_type == CallTypes.completion.value
+            or call_type == CallTypes.acompletion.value
+        ):
+            messages = None
+            if len(args) > 1:
+                messages = args[1]
+            elif kwargs.get("messages", None):
+                messages = kwargs["messages"]
+            ### PRE-CALL RULES ###
+            if (
+                isinstance(messages, list)
+                and len(messages) > 0
+                and isinstance(messages[0], dict)
+                and "content" in messages[0]
+            ):
+                rules_obj.pre_call_rules(
+                    input="".join(
+                        m.get("content", "")
+                        for m in messages
+                        if "content" in m and isinstance(m["content"], str)
+                    ),
+                    model=model,
+                )
+        elif (
+            call_type == CallTypes.embedding.value
+            or call_type == CallTypes.aembedding.value
+        ):
+            messages = args[1] if len(args) > 1 else kwargs["input"]
+        elif (
+            call_type == CallTypes.image_generation.value
+            or call_type == CallTypes.aimage_generation.value
+        ):
+            messages = args[0] if len(args) > 0 else kwargs["prompt"]
+        elif (
+            call_type == CallTypes.moderation.value
+            or call_type == CallTypes.amoderation.value
+        ):
+            messages = args[1] if len(args) > 1 else kwargs["input"]
+        elif (
+            call_type == CallTypes.atext_completion.value
+            or call_type == CallTypes.text_completion.value
+        ):
+            messages = args[0] if len(args) > 0 else kwargs["prompt"]
+        elif (
+            call_type == CallTypes.atranscription.value
+            or call_type == CallTypes.transcription.value
+        ):
+            _file_name: BinaryIO = args[1] if len(args) > 1 else kwargs["file"]
+            messages = "audio_file"
+        stream = True if "stream" in kwargs and kwargs["stream"] == True else False
+        logging_obj = Logging(
+            model=model,
+            messages=messages,
+            stream=stream,
+            litellm_call_id=kwargs["litellm_call_id"],
+            function_id=function_id,
+            call_type=call_type,
+            start_time=start_time,
+            dynamic_success_callbacks=dynamic_success_callbacks,
+            dynamic_async_success_callbacks=dynamic_async_success_callbacks,
+            langfuse_public_key=kwargs.pop("langfuse_public_key", None),
+            langfuse_secret=kwargs.pop("langfuse_secret", None),
+        )
+        ## check if metadata is passed in
+        litellm_params = {"api_base": ""}
+        if "metadata" in kwargs:
+            litellm_params["metadata"] = kwargs["metadata"]
+        logging_obj.update_environment_variables(
+            model=model,
+            user="",
+            optional_params={},
+            litellm_params=litellm_params,
+        )
+        return logging_obj, kwargs
+    except Exception as e:
+        import logging
+
+        logging.debug(
+            f"[Non-Blocking] {traceback.format_exc()}; args - {args}; kwargs - {kwargs}"
+        )
+        raise e
+
+
 def client(original_function):
     global liteDebuggerClient, get_all_keys
     rules_obj = Rules()
-
-    def function_setup(
-        start_time, *args, **kwargs
-    ):  # just run once to check if user wants to send their data anywhere - PostHog/Sentry/Slack/etc.
-        try:
-            global callback_list, add_breadcrumb, user_logger_fn, Logging
-            function_id = kwargs["id"] if "id" in kwargs else None
-            if litellm.use_client or (
-                "use_client" in kwargs and kwargs["use_client"] == True
-            ):
-                print_verbose(f"litedebugger initialized")
-                if "lite_debugger" not in litellm.input_callback:
-                    litellm.input_callback.append("lite_debugger")
-                if "lite_debugger" not in litellm.success_callback:
-                    litellm.success_callback.append("lite_debugger")
-                if "lite_debugger" not in litellm.failure_callback:
-                    litellm.failure_callback.append("lite_debugger")
-            if len(litellm.callbacks) > 0:
-                for callback in litellm.callbacks:
-                    if callback not in litellm.input_callback:
-                        litellm.input_callback.append(callback)
-                    if callback not in litellm.success_callback:
-                        litellm.success_callback.append(callback)
-                    if callback not in litellm.failure_callback:
-                        litellm.failure_callback.append(callback)
-                    if callback not in litellm._async_success_callback:
-                        litellm._async_success_callback.append(callback)
-                    if callback not in litellm._async_failure_callback:
-                        litellm._async_failure_callback.append(callback)
-                print_verbose(
-                    f"Initialized litellm callbacks, Async Success Callbacks: {litellm._async_success_callback}"
-                )
-            if (
-                len(litellm.input_callback) > 0
-                or len(litellm.success_callback) > 0
-                or len(litellm.failure_callback) > 0
-            ) and len(callback_list) == 0:
-                callback_list = list(
-                    set(
-                        litellm.input_callback
-                        + litellm.success_callback
-                        + litellm.failure_callback
-                    )
-                )
-                set_callbacks(callback_list=callback_list, function_id=function_id)
-            ## ASYNC CALLBACKS
-            if len(litellm.input_callback) > 0:
-                removed_async_items = []
-                for index, callback in enumerate(litellm.input_callback):
-                    if inspect.iscoroutinefunction(callback):
-                        litellm._async_input_callback.append(callback)
-                        removed_async_items.append(index)
-
-                # Pop the async items from input_callback in reverse order to avoid index issues
-                for index in reversed(removed_async_items):
-                    litellm.input_callback.pop(index)
-
-            if len(litellm.success_callback) > 0:
-                removed_async_items = []
-                for index, callback in enumerate(litellm.success_callback):
-                    if inspect.iscoroutinefunction(callback):
-                        litellm._async_success_callback.append(callback)
-                        removed_async_items.append(index)
-                    elif callback == "dynamodb":
-                        # dynamo is an async callback, it's used for the proxy and needs to be async
-                        # we only support async dynamo db logging for acompletion/aembedding since that's used on proxy
-                        litellm._async_success_callback.append(callback)
-                        removed_async_items.append(index)
-
-                # Pop the async items from success_callback in reverse order to avoid index issues
-                for index in reversed(removed_async_items):
-                    litellm.success_callback.pop(index)
-
-            if len(litellm.failure_callback) > 0:
-                removed_async_items = []
-                for index, callback in enumerate(litellm.failure_callback):
-                    if inspect.iscoroutinefunction(callback):
-                        litellm._async_failure_callback.append(callback)
-                        removed_async_items.append(index)
-
-                # Pop the async items from failure_callback in reverse order to avoid index issues
-                for index in reversed(removed_async_items):
-                    litellm.failure_callback.pop(index)
-            ### DYNAMIC CALLBACKS ###
-            dynamic_success_callbacks = None
-            dynamic_async_success_callbacks = None
-            if kwargs.get("success_callback", None) is not None and isinstance(
-                kwargs["success_callback"], list
-            ):
-                removed_async_items = []
-                for index, callback in enumerate(kwargs["success_callback"]):
-                    if (
-                        inspect.iscoroutinefunction(callback)
-                        or callback == "dynamodb"
-                        or callback == "s3"
-                    ):
-                        if dynamic_async_success_callbacks is not None and isinstance(
-                            dynamic_async_success_callbacks, list
-                        ):
-                            dynamic_async_success_callbacks.append(callback)
-                        else:
-                            dynamic_async_success_callbacks = [callback]
-                        removed_async_items.append(index)
-                # Pop the async items from success_callback in reverse order to avoid index issues
-                for index in reversed(removed_async_items):
-                    kwargs["success_callback"].pop(index)
-                dynamic_success_callbacks = kwargs.pop("success_callback")
-
-            if add_breadcrumb:
-                add_breadcrumb(
-                    category="litellm.llm_call",
-                    message=f"Positional Args: {args}, Keyword Args: {kwargs}",
-                    level="info",
-                )
-            if "logger_fn" in kwargs:
-                user_logger_fn = kwargs["logger_fn"]
-            # INIT LOGGER - for user-specified integrations
-            model = args[0] if len(args) > 0 else kwargs.get("model", None)
-            call_type = original_function.__name__
-            if (
-                call_type == CallTypes.completion.value
-                or call_type == CallTypes.acompletion.value
-            ):
-                messages = None
-                if len(args) > 1:
-                    messages = args[1]
-                elif kwargs.get("messages", None):
-                    messages = kwargs["messages"]
-                ### PRE-CALL RULES ###
-                if (
-                    isinstance(messages, list)
-                    and len(messages) > 0
-                    and isinstance(messages[0], dict)
-                    and "content" in messages[0]
-                ):
-                    rules_obj.pre_call_rules(
-                        input="".join(
-                            m.get("content", "")
-                            for m in messages
-                            if isinstance(m["content"], str)
-                        ),
-                        model=model,
-                    )
-            elif (
-                call_type == CallTypes.embedding.value
-                or call_type == CallTypes.aembedding.value
-            ):
-                messages = args[1] if len(args) > 1 else kwargs["input"]
-            elif (
-                call_type == CallTypes.image_generation.value
-                or call_type == CallTypes.aimage_generation.value
-            ):
-                messages = args[0] if len(args) > 0 else kwargs["prompt"]
-            elif (
-                call_type == CallTypes.moderation.value
-                or call_type == CallTypes.amoderation.value
-            ):
-                messages = args[1] if len(args) > 1 else kwargs["input"]
-            elif (
-                call_type == CallTypes.atext_completion.value
-                or call_type == CallTypes.text_completion.value
-            ):
-                messages = args[0] if len(args) > 0 else kwargs["prompt"]
-            elif (
-                call_type == CallTypes.atranscription.value
-                or call_type == CallTypes.transcription.value
-            ):
-                _file_name: BinaryIO = args[1] if len(args) > 1 else kwargs["file"]
-                messages = "audio_file"
-            stream = True if "stream" in kwargs and kwargs["stream"] == True else False
-            logging_obj = Logging(
-                model=model,
-                messages=messages,
-                stream=stream,
-                litellm_call_id=kwargs["litellm_call_id"],
-                function_id=function_id,
-                call_type=call_type,
-                start_time=start_time,
-                dynamic_success_callbacks=dynamic_success_callbacks,
-                dynamic_async_success_callbacks=dynamic_async_success_callbacks,
-                langfuse_public_key=kwargs.pop("langfuse_public_key", None),
-                langfuse_secret=kwargs.pop("langfuse_secret", None),
-            )
-            ## check if metadata is passed in
-            litellm_params = {"api_base": ""}
-            if "metadata" in kwargs:
-                litellm_params["metadata"] = kwargs["metadata"]
-            logging_obj.update_environment_variables(
-                model=model,
-                user="",
-                optional_params={},
-                litellm_params=litellm_params,
-            )
-            return logging_obj, kwargs
-        except Exception as e:
-            import logging
-
-            logging.debug(
-                f"[Non-Blocking] {traceback.format_exc()}; args - {args}; kwargs - {kwargs}"
-            )
-            raise e
 
     def check_coroutine(value) -> bool:
         if inspect.iscoroutine(value):
@@ -2659,7 +2716,9 @@ def client(original_function):
 
         try:
             if logging_obj is None:
-                logging_obj, kwargs = function_setup(start_time, *args, **kwargs)
+                logging_obj, kwargs = function_setup(
+                    original_function, rules_obj, start_time, *args, **kwargs
+                )
             kwargs["litellm_logging_obj"] = logging_obj
 
             # CHECK FOR 'os.environ/' in kwargs
@@ -2686,23 +2745,22 @@ def client(original_function):
 
             # [OPTIONAL] CHECK CACHE
             print_verbose(
-                f"kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}"
+                f"SYNC kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}; kwargs.get('cache')['no-cache']: {kwargs.get('cache', {}).get('no-cache', False)}"
             )
             # if caching is false or cache["no-cache"]==True, don't run this
             if (
                 (
                     (
-                        kwargs.get("caching", None) is None
-                        and kwargs.get("cache", None) is None
-                        and litellm.cache is not None
+                        (
+                            kwargs.get("caching", None) is None
+                            and litellm.cache is not None
+                        )
+                        or kwargs.get("caching", False) == True
                     )
-                    or kwargs.get("caching", False) == True
-                    or (
-                        kwargs.get("cache", None) is not None
-                        and kwargs.get("cache", {}).get("no-cache", False) != True
-                    )
+                    and kwargs.get("cache", {}).get("no-cache", False) != True
                 )
                 and kwargs.get("aembedding", False) != True
+                and kwargs.get("atext_completion", False) != True
                 and kwargs.get("acompletion", False) != True
                 and kwargs.get("aimg_generation", False) != True
                 and kwargs.get("atranscription", False) != True
@@ -2967,7 +3025,9 @@ def client(original_function):
 
         try:
             if logging_obj is None:
-                logging_obj, kwargs = function_setup(start_time, *args, **kwargs)
+                logging_obj, kwargs = function_setup(
+                    original_function, rules_obj, start_time, *args, **kwargs
+                )
             kwargs["litellm_logging_obj"] = logging_obj
 
             # [OPTIONAL] CHECK BUDGET
@@ -2979,27 +3039,20 @@ def client(original_function):
                     )
 
             # [OPTIONAL] CHECK CACHE
-            print_verbose(f"litellm.cache: {litellm.cache}")
             print_verbose(
-                f"kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}"
+                f"ASYNC kwargs[caching]: {kwargs.get('caching', False)}; litellm.cache: {litellm.cache}; kwargs.get('cache'): {kwargs.get('cache', None)}"
             )
             # if caching is false, don't run this
             final_embedding_cached_response = None
 
             if (
-                (
-                    kwargs.get("caching", None) is None
-                    and kwargs.get("cache", None) is None
-                    and litellm.cache is not None
-                )
+                (kwargs.get("caching", None) is None and litellm.cache is not None)
                 or kwargs.get("caching", False) == True
-                or (
-                    kwargs.get("cache", None) is not None
-                    and kwargs.get("cache").get("no-cache", False) != True
-                )
+            ) and (
+                kwargs.get("cache", {}).get("no-cache", False) != True
             ):  # allow users to control returning cached responses from the completion function
                 # checking cache
-                print_verbose(f"INSIDE CHECKING CACHE")
+                print_verbose("INSIDE CHECKING CACHE")
                 if (
                     litellm.cache is not None
                     and str(original_function.__name__)
@@ -3042,7 +3095,6 @@ def client(original_function):
                             preset_cache_key  # for streaming calls, we need to pass the preset_cache_key
                         )
                         cached_result = litellm.cache.get_cache(*args, **kwargs)
-
                     if cached_result is not None and not isinstance(
                         cached_result, list
                     ):
@@ -3106,6 +3158,22 @@ def client(original_function):
                                     response_object=cached_result,
                                     model_response_object=ModelResponse(),
                                 )
+                        if (
+                            call_type == CallTypes.atext_completion.value
+                            and isinstance(cached_result, dict)
+                        ):
+                            if kwargs.get("stream", False) == True:
+                                cached_result = convert_to_streaming_response_async(
+                                    response_object=cached_result,
+                                )
+                                cached_result = CustomStreamWrapper(
+                                    completion_stream=cached_result,
+                                    model=model,
+                                    custom_llm_provider="cached_response",
+                                    logging_obj=logging_obj,
+                                )
+                            else:
+                                cached_result = TextCompletionResponse(**cached_result)
                         elif call_type == CallTypes.aembedding.value and isinstance(
                             cached_result, dict
                         ):
@@ -3174,7 +3242,13 @@ def client(original_function):
                             for val in non_null_list:
                                 idx, cr = val  # (idx, cr) tuple
                                 if cr is not None:
-                                    final_embedding_cached_response.data[idx] = cr
+                                    final_embedding_cached_response.data[idx] = (
+                                        Embedding(
+                                            embedding=cr["embedding"],
+                                            index=idx,
+                                            object="embedding",
+                                        )
+                                    )
                         if len(remaining_list) == 0:
                             # LOG SUCCESS
                             cache_hit = True
@@ -4134,6 +4208,28 @@ def supports_function_calling(model: str):
         )
 
 
+def supports_vision(model: str):
+    """
+    Check if the given model supports vision and return a boolean value.
+
+    Parameters:
+    model (str): The model name to be checked.
+
+    Returns:
+    bool: True if the model supports vision, False otherwise.
+
+    Raises:
+    Exception: If the given model is not found in model_prices_and_context_window.json.
+    """
+    if model in litellm.model_cost:
+        model_info = litellm.model_cost[model]
+        if model_info.get("supports_vision", False):
+            return True
+        return False
+    else:
+        return False
+
+
 def supports_parallel_function_calling(model: str):
     """
     Check if the given model supports parallel function calling and return True if it does, False otherwise.
@@ -4501,6 +4597,7 @@ def get_optional_params(
             and custom_llm_provider != "vertex_ai"
             and custom_llm_provider != "anyscale"
             and custom_llm_provider != "together_ai"
+            and custom_llm_provider != "groq"
             and custom_llm_provider != "mistral"
             and custom_llm_provider != "anthropic"
             and custom_llm_provider != "cohere_chat"
@@ -4660,6 +4757,8 @@ def get_optional_params(
             optional_params["stop_sequences"] = stop
         if tools is not None:
             optional_params["tools"] = tools
+        if seed is not None:
+            optional_params["seed"] = seed
     elif custom_llm_provider == "maritalk":
         ## check if unsupported param passed in
         supported_params = get_supported_openai_params(
@@ -4831,28 +4930,11 @@ def get_optional_params(
         )
         _check_valid_arg(supported_params=supported_params)
 
-        if temperature is not None:
-            optional_params["temperature"] = temperature
-        if top_p is not None:
-            optional_params["top_p"] = top_p
-        if stream:
-            optional_params["stream"] = stream
-        if max_tokens is not None:
-            optional_params["max_output_tokens"] = max_tokens
-        if tools is not None and isinstance(tools, list):
-            from vertexai.preview import generative_models
+        optional_params = litellm.VertexAIConfig().map_openai_params(
+            non_default_params=non_default_params,
+            optional_params=optional_params,
+        )
 
-            gtool_func_declarations = []
-            for tool in tools:
-                gtool_func_declaration = generative_models.FunctionDeclaration(
-                    name=tool["function"]["name"],
-                    description=tool["function"].get("description", ""),
-                    parameters=tool["function"].get("parameters", {}),
-                )
-                gtool_func_declarations.append(gtool_func_declaration)
-            optional_params["tools"] = [
-                generative_models.Tool(function_declarations=gtool_func_declarations)
-            ]
         print_verbose(
             f"(end) INSIDE THE VERTEX AI OPTIONAL PARAM BLOCK - optional_params: {optional_params}"
         )
@@ -5191,6 +5273,31 @@ def get_optional_params(
         optional_params["extra_body"] = (
             extra_body  # openai client supports `extra_body` param
         )
+    elif custom_llm_provider == "groq":
+        supported_params = get_supported_openai_params(
+            model=model, custom_llm_provider=custom_llm_provider
+        )
+        _check_valid_arg(supported_params=supported_params)
+
+        if temperature is not None:
+            optional_params["temperature"] = temperature
+        if max_tokens is not None:
+            optional_params["max_tokens"] = max_tokens
+        if top_p is not None:
+            optional_params["top_p"] = top_p
+        if stream is not None:
+            optional_params["stream"] = stream
+        if stop is not None:
+            optional_params["stop"] = stop
+        if tools is not None:
+            optional_params["tools"] = tools
+        if tool_choice is not None:
+            optional_params["tool_choice"] = tool_choice
+        if response_format is not None:
+            optional_params["response_format"] = response_format
+        if seed is not None:
+            optional_params["seed"] = seed
+
     elif custom_llm_provider == "openrouter":
         supported_params = get_supported_openai_params(
             model=model, custom_llm_provider=custom_llm_provider
@@ -5310,6 +5417,49 @@ def get_optional_params(
     return optional_params
 
 
+def calculate_max_parallel_requests(
+    max_parallel_requests: Optional[int],
+    rpm: Optional[int],
+    tpm: Optional[int],
+    default_max_parallel_requests: Optional[int],
+) -> Optional[int]:
+    """
+    Returns the max parallel requests to send to a deployment.
+
+    Used in semaphore for async requests on router.
+
+    Parameters:
+    - max_parallel_requests - Optional[int] - max_parallel_requests allowed for that deployment
+    - rpm - Optional[int] - requests per minute allowed for that deployment
+    - tpm - Optional[int] - tokens per minute allowed for that deployment
+    - default_max_parallel_requests - Optional[int] - default_max_parallel_requests allowed for any deployment
+
+    Returns:
+    - int or None (if all params are None)
+
+    Order:
+    max_parallel_requests > rpm > tpm / 6 (azure formula) > default max_parallel_requests
+
+    Azure RPM formula:
+    6 rpm per 1000 TPM
+    https://learn.microsoft.com/en-us/azure/ai-services/openai/quotas-limits
+
+
+    """
+    if max_parallel_requests is not None:
+        return max_parallel_requests
+    elif rpm is not None:
+        return rpm
+    elif tpm is not None:
+        calculated_rpm = int(tpm / 1000 / 6)
+        if calculated_rpm == 0:
+            calculated_rpm = 1
+        return calculated_rpm
+    elif default_max_parallel_requests is not None:
+        return default_max_parallel_requests
+    return None
+
+
 def get_api_base(model: str, optional_params: dict) -> Optional[str]:
     """
     Returns the api base used for calling the model.
@@ -5328,7 +5478,9 @@ def get_api_base(model: str, optional_params: dict) -> Optional[str]:
     get_api_base(model="gemini/gemini-pro")
     ```
     """
-    _optional_params = LiteLLM_Params(**optional_params)  # convert to pydantic object
+    _optional_params = LiteLLM_Params(
+        model=model, **optional_params
+    )  # convert to pydantic object
     # get llm provider
     try:
         model, custom_llm_provider, dynamic_api_key, api_base = get_llm_provider(
@@ -5395,6 +5547,18 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
             "tools",
             "tool_choice",
         ]
+    elif custom_llm_provider == "groq":
+        return [
+            "temperature",
+            "max_tokens",
+            "top_p",
+            "stream",
+            "stop",
+            "tools",
+            "tool_choice",
+            "response_format",
+            "seed",
+        ]
     elif custom_llm_provider == "cohere":
         return [
             "stream",
@@ -5419,6 +5583,7 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
             "n",
             "tools",
             "tool_choice",
+            "seed",
         ]
     elif custom_llm_provider == "maritalk":
         return [
@@ -5518,14 +5683,7 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
     elif custom_llm_provider == "palm" or custom_llm_provider == "gemini":
         return ["temperature", "top_p", "stream", "n", "stop", "max_tokens"]
     elif custom_llm_provider == "vertex_ai":
-        return [
-            "temperature",
-            "top_p",
-            "max_tokens",
-            "stream",
-            "tools",
-            "tool_choice",
-        ]
+        return litellm.VertexAIConfig().get_supported_openai_params()
     elif custom_llm_provider == "sagemaker":
         return ["stream", "temperature", "max_tokens", "top_p", "stop", "n"]
     elif custom_llm_provider == "aleph_alpha":
@@ -5576,6 +5734,7 @@ def get_supported_openai_params(model: str, custom_llm_provider: str):
             "frequency_penalty",
             "logit_bias",
             "user",
+            "response_format",
         ]
     elif custom_llm_provider == "perplexity":
         return [
@@ -5800,6 +5959,7 @@ def get_llm_provider(
             or model in litellm.vertex_code_text_models
             or model in litellm.vertex_language_models
             or model in litellm.vertex_embedding_models
+            or model in litellm.vertex_vision_models
         ):
             custom_llm_provider = "vertex_ai"
         ## ai21
@@ -5849,6 +6009,9 @@ def get_llm_provider(
         if isinstance(e, litellm.exceptions.BadRequestError):
             raise e
         else:
+            error_str = (
+                f"GetLLMProvider Exception - {str(e)}\n\noriginal model: {model}"
+            )
             raise litellm.exceptions.BadRequestError(  # type: ignore
                 message=f"GetLLMProvider Exception - {str(e)}\n\noriginal model: {model}",
                 model=model,
@@ -5903,6 +6066,16 @@ def get_api_key(llm_provider: str, dynamic_api_key: Optional[str]):
             or get_secret("TOGETHER_AI_TOKEN")
         )
     return api_key
+
+
+def get_utc_datetime():
+    import datetime as dt
+    from datetime import datetime
+
+    if hasattr(dt, "UTC"):
+        return datetime.now(dt.UTC)  # type: ignore
+    else:
+        return datetime.utcnow()  # type: ignore
 
 
 def get_max_tokens(model: str):
@@ -6029,7 +6202,13 @@ def get_model_info(model: str):
                 "mode": "chat",
             }
         else:
-            raise Exception()
+            """
+            Check if model in model cost map
+            """
+            if model in litellm.model_cost:
+                return litellm.model_cost[model]
+            else:
+                raise Exception()
     except:
         raise Exception(
             "This model isn't mapped yet. Add it here - https://github.com/BerriAI/litellm/blob/main/model_prices_and_context_window.json"
@@ -6393,7 +6572,7 @@ def validate_environment(model: Optional[str] = None) -> dict:
 
 def set_callbacks(callback_list, function_id=None):
 
-    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger
+    global sentry_sdk_instance, capture_exception, add_breadcrumb, posthog, slack_app, alerts_channel, traceloopLogger, athinaLogger, heliconeLogger, aispendLogger, berrispendLogger, supabaseClient, liteDebuggerClient, lunaryLogger, promptLayerLogger, langFuseLogger, customLogger, weightsBiasesLogger, langsmithLogger, dynamoLogger, s3Logger, dataDogLogger, prometheusLogger, greenscaleLogger
 
     try:
         for callback in callback_list:
@@ -6480,6 +6659,9 @@ def set_callbacks(callback_list, function_id=None):
             elif callback == "supabase":
                 print_verbose(f"instantiating supabase")
                 supabaseClient = Supabase()
+            elif callback == "greenscale":
+                greenscaleLogger = GreenscaleLogger()
+                print_verbose("Initialized Greenscale Logger")
             elif callback == "lite_debugger":
                 print_verbose(f"instantiating lite_debugger")
                 if function_id:
@@ -6523,8 +6705,11 @@ def handle_failure(exception, traceback_exception, start_time, end_time, args, k
                     for detail in additional_details:
                         slack_msg += f"{detail}: {additional_details[detail]}\n"
                     slack_msg += f"Traceback: {traceback_exception}"
+                    truncated_slack_msg = textwrap.shorten(
+                        slack_msg, width=512, placeholder="..."
+                    )
                     slack_app.client.chat_postMessage(
-                        channel=alerts_channel, text=slack_msg
+                        channel=alerts_channel, text=truncated_slack_msg
                     )
                 elif callback == "sentry":
                     capture_exception(exception)
@@ -7210,6 +7395,7 @@ def exception_type(
     original_exception,
     custom_llm_provider,
     completion_kwargs={},
+    extra_kwargs={},
 ):
     global user_logger_fn, liteDebuggerClient
     exception_mapping_worked = False
@@ -7229,11 +7415,18 @@ def exception_type(
                 exception_type = type(original_exception).__name__
             else:
                 exception_type = ""
+            _api_base = ""
+            try:
+                _api_base = litellm.get_api_base(
+                    model=model, optional_params=extra_kwargs
+                )
+            except:
+                _api_base = ""
 
             if "Request Timeout Error" in error_str or "Request timed out" in error_str:
                 exception_mapping_worked = True
                 raise Timeout(
-                    message=f"APITimeoutError - Request timed out",
+                    message=f"APITimeoutError - Request timed out. \n model: {model} \n api_base: {_api_base} \n error_str: {error_str}",
                     model=model,
                     llm_provider=custom_llm_provider,
                 )
@@ -7452,7 +7645,6 @@ def exception_type(
                             message=f"AnthropicException - {original_exception.message}",
                             model=model,
                             llm_provider="anthropic",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
@@ -7549,7 +7741,6 @@ def exception_type(
                             message=f"ReplicateException - {original_exception.message}",
                             model=model,
                             llm_provider="replicate",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
@@ -7706,6 +7897,26 @@ def exception_type(
                         response=original_exception.response,
                     )
             elif custom_llm_provider == "vertex_ai":
+                if completion_kwargs is not None:
+                    # add model, deployment and model_group to the exception message
+                    _model = completion_kwargs.get("model")
+                    error_str += f"\nmodel: {_model}\n"
+                if extra_kwargs is not None:
+                    _vertex_project = extra_kwargs.get("vertex_project")
+                    _vertex_location = extra_kwargs.get("vertex_location")
+                    _metadata = extra_kwargs.get("metadata", {}) or {}
+                    _model_group = _metadata.get("model_group")
+                    _deployment = _metadata.get("deployment")
+
+                    if _model_group is not None:
+                        error_str += f"model_group: {_model_group}\n"
+                    if _deployment is not None:
+                        error_str += f"deployment: {_deployment}\n"
+                    if _vertex_project is not None:
+                        error_str += f"vertex_project: {_vertex_project}\n"
+                    if _vertex_location is not None:
+                        error_str += f"vertex_location: {_vertex_location}\n"
+
                 if (
                     "Vertex AI API has not been used in project" in error_str
                     or "Unable to find your project" in error_str
@@ -7716,6 +7927,15 @@ def exception_type(
                         model=model,
                         llm_provider="vertex_ai",
                         response=original_exception.response,
+                    )
+                elif "None Unknown Error." in error_str:
+                    exception_mapping_worked = True
+                    raise APIError(
+                        message=f"VertexAIException - {error_str}",
+                        status_code=500,
+                        model=model,
+                        llm_provider="vertex_ai",
+                        request=original_exception.request,
                     )
                 elif "403" in error_str:
                     exception_mapping_worked = True
@@ -7741,7 +7961,9 @@ def exception_type(
                     )
                 elif (
                     "429 Quota exceeded" in error_str
-                    or "IndexError: list index out of range"
+                    or "IndexError: list index out of range" in error_str
+                    or "429 Unable to submit request because the service is temporarily out of capacity."
+                    in error_str
                 ):
                     exception_mapping_worked = True
                     raise RateLimitError(
@@ -7958,7 +8180,6 @@ def exception_type(
                             message=f"HuggingfaceException - {original_exception.message}",
                             model=model,
                             llm_provider="huggingface",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 429:
                         exception_mapping_worked = True
@@ -8018,7 +8239,6 @@ def exception_type(
                             message=f"AI21Exception - {original_exception.message}",
                             model=model,
                             llm_provider="ai21",
-                            request=original_exception.request,
                         )
                     if original_exception.status_code == 422:
                         exception_mapping_worked = True
@@ -8108,7 +8328,6 @@ def exception_type(
                             message=f"NLPCloudException - {original_exception.message}",
                             model=model,
                             llm_provider="nlp_cloud",
-                            request=original_exception.request,
                         )
                     elif (
                         original_exception.status_code == 429
@@ -8225,7 +8444,6 @@ def exception_type(
                             message=f"TogetherAIException - {original_exception.message}",
                             model=model,
                             llm_provider="together_ai",
-                            request=original_exception.request,
                         )
                     elif original_exception.status_code == 422:
                         exception_mapping_worked = True
@@ -8425,7 +8643,6 @@ def exception_type(
                             message=f"AzureException - {original_exception.message}",
                             model=model,
                             llm_provider="azure",
-                            request=original_exception.request,
                         )
                     if original_exception.status_code == 422:
                         exception_mapping_worked = True
@@ -8736,7 +8953,16 @@ class CustomStreamWrapper:
             raise e
 
     def check_special_tokens(self, chunk: str, finish_reason: Optional[str]):
+        """
+        Output parse <s> / </s> special tokens for sagemaker + hf streaming.
+        """
         hold = False
+        if (
+            self.custom_llm_provider != "huggingface"
+            and self.custom_llm_provider != "sagemaker"
+        ):
+            return hold, chunk
+
         if finish_reason:
             for token in self.special_tokens:
                 if token in chunk:
@@ -8752,6 +8978,7 @@ class CustomStreamWrapper:
         for token in self.special_tokens:
             if len(curr_chunk) < len(token) and curr_chunk in token:
                 hold = True
+                self.holding_chunk = curr_chunk
             elif len(curr_chunk) >= len(token):
                 if token in curr_chunk:
                     self.holding_chunk = curr_chunk.replace(token, "")
@@ -8763,8 +8990,39 @@ class CustomStreamWrapper:
             self.holding_chunk = ""
         return hold, curr_chunk
 
+    def handle_anthropic_text_chunk(self, chunk):
+        str_line = chunk
+        if isinstance(chunk, bytes):  # Handle binary data
+            str_line = chunk.decode("utf-8")  # Convert bytes to string
+        text = ""
+        is_finished = False
+        finish_reason = None
+        if str_line.startswith("data:"):
+            data_json = json.loads(str_line[5:])
+            type_chunk = data_json.get("type", None)
+            if type_chunk == "completion":
+                text = data_json.get("completion")
+                finish_reason = data_json.get("stop_reason")
+                if finish_reason is not None:
+                    is_finished = True
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
+        elif "error" in str_line:
+            raise ValueError(f"Unable to parse response. Original response: {str_line}")
+        else:
+            return {
+                "text": text,
+                "is_finished": is_finished,
+                "finish_reason": finish_reason,
+            }
+
     def handle_anthropic_chunk(self, chunk):
-        str_line = chunk.decode("utf-8")  # Convert bytes to string
+        str_line = chunk
+        if isinstance(chunk, bytes):  # Handle binary data
+            str_line = chunk.decode("utf-8")  # Convert bytes to string
         text = ""
         is_finished = False
         finish_reason = None
@@ -9448,6 +9706,14 @@ class CustomStreamWrapper:
                 completion_obj["content"] = response_obj["text"]
                 if response_obj["is_finished"]:
                     self.received_finish_reason = response_obj["finish_reason"]
+            elif (
+                self.custom_llm_provider
+                and self.custom_llm_provider == "anthropic_text"
+            ):
+                response_obj = self.handle_anthropic_text_chunk(chunk)
+                completion_obj["content"] = response_obj["text"]
+                if response_obj["is_finished"]:
+                    self.received_finish_reason = response_obj["finish_reason"]
             elif self.model == "replicate" or self.custom_llm_provider == "replicate":
                 response_obj = self.handle_replicate_chunk(chunk)
                 completion_obj["content"] = response_obj["text"]
@@ -9774,6 +10040,22 @@ class CustomStreamWrapper:
                                                 t.function.arguments = ""
                             _json_delta = delta.model_dump()
                             print_verbose(f"_json_delta: {_json_delta}")
+                            if "role" not in _json_delta or _json_delta["role"] is None:
+                                _json_delta["role"] = (
+                                    "assistant"  # mistral's api returns role as None
+                                )
+                            if "tool_calls" in _json_delta and isinstance(
+                                _json_delta["tool_calls"], list
+                            ):
+                                for tool in _json_delta["tool_calls"]:
+                                    if (
+                                        isinstance(tool, dict)
+                                        and "function" in tool
+                                        and isinstance(tool["function"], dict)
+                                        and ("type" not in tool or tool["type"] is None)
+                                    ):
+                                        # if function returned but type set to None - mistral's api returns type: None
+                                        tool["type"] = "function"
                             model_response.choices[0].delta = Delta(**_json_delta)
                         except Exception as e:
                             traceback.print_exc()
@@ -9794,6 +10076,7 @@ class CustomStreamWrapper:
                 f"model_response.choices[0].delta: {model_response.choices[0].delta}; completion_obj: {completion_obj}"
             )
             print_verbose(f"self.sent_first_chunk: {self.sent_first_chunk}")
+
             ## RETURN ARG
             if (
                 "content" in completion_obj
@@ -9866,7 +10149,6 @@ class CustomStreamWrapper:
             elif self.received_finish_reason is not None:
                 if self.sent_last_chunk == True:
                     raise StopIteration
-
                 # flush any remaining holding chunk
                 if len(self.holding_chunk) > 0:
                     if model_response.choices[0].delta.content is None:
@@ -10024,6 +10306,8 @@ class CustomStreamWrapper:
                 or self.custom_llm_provider == "custom_openai"
                 or self.custom_llm_provider == "text-completion-openai"
                 or self.custom_llm_provider == "azure_text"
+                or self.custom_llm_provider == "anthropic"
+                or self.custom_llm_provider == "anthropic_text"
                 or self.custom_llm_provider == "huggingface"
                 or self.custom_llm_provider == "ollama"
                 or self.custom_llm_provider == "ollama_chat"
@@ -10437,16 +10721,18 @@ def trim_messages(
     messages = copy.deepcopy(messages)
     try:
         print_verbose(f"trimming messages")
-        if max_tokens == None:
+        if max_tokens is None:
             # Check if model is valid
             if model in litellm.model_cost:
-                max_tokens_for_model = litellm.model_cost[model]["max_tokens"]
+                max_tokens_for_model = litellm.model_cost[model].get(
+                    "max_input_tokens", litellm.model_cost[model]["max_tokens"]
+                )
                 max_tokens = int(max_tokens_for_model * trim_ratio)
             else:
-                # if user did not specify max tokens
+                # if user did not specify max (input) tokens
                 # or passed an llm litellm does not know
                 # do nothing, just return messages
-                return
+                return messages
 
         system_message = ""
         for message in messages:

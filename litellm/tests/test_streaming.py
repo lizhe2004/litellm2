@@ -220,6 +220,17 @@ tools_schema = [
 # test_completion_cohere_stream()
 
 
+def test_completion_azure_stream_special_char():
+    litellm.set_verbose = True
+    messages = [{"role": "user", "content": "hi. respond with the <xml> tag only"}]
+    response = completion(model="azure/chatgpt-v-2", messages=messages, stream=True)
+    response_str = ""
+    for part in response:
+        response_str += part.choices[0].delta.content or ""
+    print(f"response_str: {response_str}")
+    assert len(response_str) > 0
+
+
 def test_completion_cohere_stream_bad_key():
     try:
         litellm.cache = None
@@ -380,6 +391,51 @@ def test_completion_claude_stream():
 
 
 # test_completion_claude_stream()
+def test_completion_claude_2_stream():
+    litellm.set_verbose = True
+    response = completion(
+        model="claude-2",
+        messages=[{"role": "user", "content": "hello from litellm"}],
+        stream=True,
+    )
+    complete_response = ""
+    # Add any assertions here to check the response
+    idx = 0
+    for chunk in response:
+        print(chunk)
+        # print(chunk.choices[0].delta)
+        chunk, finished = streaming_format_tests(idx, chunk)
+        if finished:
+            break
+        complete_response += chunk
+        idx += 1
+    if complete_response.strip() == "":
+        raise Exception("Empty response received")
+    print(f"completion_response: {complete_response}")
+
+
+@pytest.mark.asyncio
+async def test_acompletion_claude_2_stream():
+    litellm.set_verbose = True
+    response = await litellm.acompletion(
+        model="claude-2",
+        messages=[{"role": "user", "content": "hello from litellm"}],
+        stream=True,
+    )
+    complete_response = ""
+    # Add any assertions here to check the response
+    idx = 0
+    async for chunk in response:
+        print(chunk)
+        # print(chunk.choices[0].delta)
+        chunk, finished = streaming_format_tests(idx, chunk)
+        if finished:
+            break
+        complete_response += chunk
+        idx += 1
+    if complete_response.strip() == "":
+        raise Exception("Empty response received")
+    print(f"completion_response: {complete_response}")
 
 
 def test_completion_palm_stream():
@@ -529,6 +585,64 @@ def test_completion_mistral_api_stream():
         print(f"completion_response: {complete_response}")
     except litellm.APIError as e:
         pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
+def test_completion_mistral_api_mistral_large_function_call_with_streaming():
+    litellm.set_verbose = True
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_current_weather",
+                "description": "Get the current weather in a given location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        },
+                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                    },
+                    "required": ["location"],
+                },
+            },
+        }
+    ]
+    messages = [
+        {
+            "role": "user",
+            "content": "What's the weather like in Boston today in fahrenheit?",
+        }
+    ]
+    try:
+        # test without max tokens
+        response = completion(
+            model="mistral/mistral-large-latest",
+            messages=messages,
+            tools=tools,
+            tool_choice="auto",
+            stream=True,
+        )
+        idx = 0
+        for chunk in response:
+            print(f"chunk in response: {chunk}")
+            if idx == 0:
+                assert (
+                    chunk.choices[0].delta.tool_calls[0].function.arguments is not None
+                )
+                assert isinstance(
+                    chunk.choices[0].delta.tool_calls[0].function.arguments, str
+                )
+                validate_first_streaming_function_calling_chunk(chunk=chunk)
+            elif idx == 1 and chunk.choices[0].finish_reason is None:
+                validate_second_streaming_function_calling_chunk(chunk=chunk)
+            elif chunk.choices[0].finish_reason is not None:  # last chunk
+                validate_final_streaming_function_calling_chunk(chunk=chunk)
+            idx += 1
+        # raise Exception("it worked!")
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 
@@ -831,22 +945,25 @@ def test_bedrock_claude_3_streaming():
         pytest.fail(f"Error occurred: {e}")
 
 
-def test_claude_3_streaming_finish_reason():
+@pytest.mark.asyncio
+async def test_claude_3_streaming_finish_reason():
     try:
         litellm.set_verbose = True
         messages = [
             {"role": "system", "content": "Be helpful"},
             {"role": "user", "content": "What do you know?"},
         ]
-        response: ModelResponse = completion(  # type: ignore
+        response: ModelResponse = await litellm.acompletion(  # type: ignore
             model="claude-3-opus-20240229",
             messages=messages,
             stream=True,
+            max_tokens=10,
         )
         complete_response = ""
-        # Add any assertions here to check the response
+        # Add any assertions here to-check the response
         num_finish_reason = 0
-        for idx, chunk in enumerate(response):
+        async for chunk in response:
+            print(f"chunk: {chunk}")
             if isinstance(chunk, ModelResponse):
                 if chunk.choices[0].finish_reason is not None:
                     num_finish_reason += 1
@@ -2204,7 +2321,12 @@ def test_completion_claude_3_function_call_with_streaming():
             },
         }
     ]
-    messages = [{"role": "user", "content": "What's the weather like in Boston today?"}]
+    messages = [
+        {
+            "role": "user",
+            "content": "What's the weather like in Boston today in fahrenheit?",
+        }
+    ]
     try:
         # test without max tokens
         response = completion(
@@ -2258,7 +2380,12 @@ async def test_acompletion_claude_3_function_call_with_streaming():
             },
         }
     ]
-    messages = [{"role": "user", "content": "What's the weather like in Boston today?"}]
+    messages = [
+        {
+            "role": "user",
+            "content": "What's the weather like in Boston today in fahrenheit?",
+        }
+    ]
     try:
         # test without max tokens
         response = await acompletion(
@@ -2285,7 +2412,7 @@ async def test_acompletion_claude_3_function_call_with_streaming():
             elif chunk.choices[0].finish_reason is not None:  # last chunk
                 validate_final_streaming_function_calling_chunk(chunk=chunk)
             idx += 1
-        # raise Exception("it worked!")
+        # raise Exception("it worked! ")
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 

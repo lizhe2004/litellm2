@@ -3,7 +3,11 @@ import threading, requests, os
 from typing import Callable, List, Optional, Dict, Union, Any, Literal
 from litellm.caching import Cache
 from litellm._logging import set_verbose, _turn_on_debug, verbose_logger
-from litellm.proxy._types import KeyManagementSystem, KeyManagementSettings
+from litellm.proxy._types import (
+    KeyManagementSystem,
+    KeyManagementSettings,
+    LiteLLM_UpperboundKeyGenerateParams,
+)
 import httpx
 import dotenv
 
@@ -12,10 +16,24 @@ dotenv.load_dotenv()
 if set_verbose == True:
     _turn_on_debug()
 #############################################
+### Callbacks /Logging / Success / Failure Handlers ###
 input_callback: List[Union[str, Callable]] = []
 success_callback: List[Union[str, Callable]] = []
 failure_callback: List[Union[str, Callable]] = []
+service_callback: List[Union[str, Callable]] = []
 callbacks: List[Callable] = []
+_langfuse_default_tags: Optional[
+    List[
+        Literal[
+            "user_api_key_alias",
+            "user_api_key_user_id",
+            "user_api_key_user_email",
+            "user_api_key_team_alias",
+            "semantic-similarity",
+            "proxy_base_url",
+        ]
+    ]
+] = None
 _async_input_callback: List[Callable] = (
     []
 )  # internal variable - async custom callbacks are routed here.
@@ -27,6 +45,8 @@ _async_failure_callback: List[Callable] = (
 )  # internal variable - async custom callbacks are routed here.
 pre_call_rules: List[Callable] = []
 post_call_rules: List[Callable] = []
+## end of callbacks #############
+
 email: Optional[str] = (
     None  # Not used anymore, will be removed in next MAJOR release - https://github.com/BerriAI/litellm/discussions/648
 )
@@ -46,6 +66,7 @@ replicate_key: Optional[str] = None
 cohere_key: Optional[str] = None
 maritalk_key: Optional[str] = None
 ai21_key: Optional[str] = None
+ollama_key: Optional[str] = None
 openrouter_key: Optional[str] = None
 huggingface_key: Optional[str] = None
 vertex_project: Optional[str] = None
@@ -64,7 +85,7 @@ google_moderation_confidence_threshold: Optional[float] = None
 llamaguard_unsafe_content_categories: Optional[str] = None
 blocked_user_list: Optional[Union[str, List]] = None
 banned_keywords_list: Optional[Union[str, List]] = None
-llm_guard_mode: Literal["all", "key-specific"] = "all"
+llm_guard_mode: Literal["all", "key-specific", "request-specific"] = "all"
 ##################
 logging: bool = True
 caching: bool = (
@@ -172,7 +193,7 @@ dynamodb_table_name: Optional[str] = None
 s3_callback_params: Optional[Dict] = None
 generic_logger_headers: Optional[Dict] = None
 default_key_generate_params: Optional[Dict] = None
-upperbound_key_generate_params: Optional[Dict] = None
+upperbound_key_generate_params: Optional[LiteLLM_UpperboundKeyGenerateParams] = None
 default_user_params: Optional[Dict] = None
 default_team_settings: Optional[List] = None
 max_user_budget: Optional[float] = None
@@ -578,6 +599,7 @@ from .utils import (
     completion_cost,
     supports_function_calling,
     supports_parallel_function_calling,
+    supports_vision,
     get_litellm_params,
     Logging,
     acreate,

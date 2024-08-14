@@ -13,6 +13,7 @@ import json, traceback, ast, hashlib
 from typing import Optional, Literal, List, Union, Any, BinaryIO
 from openai._models import BaseModel as OpenAIObject
 from litellm._logging import verbose_logger
+from litellm.types.services import ServiceLoggerPayload, ServiceTypes
 import traceback
 
 
@@ -81,8 +82,36 @@ class InMemoryCache(BaseCache):
             return cached_response
         return None
 
+    def batch_get_cache(self, keys: list, **kwargs):
+        return_val = []
+        for k in keys:
+            val = self.get_cache(key=k, **kwargs)
+            return_val.append(val)
+        return return_val
+
+    def increment_cache(self, key, value: int, **kwargs) -> int:
+        # get the value
+        init_value = self.get_cache(key=key) or 0
+        value = init_value + value
+        self.set_cache(key, value, **kwargs)
+        return value
+
     async def async_get_cache(self, key, **kwargs):
         return self.get_cache(key=key, **kwargs)
+
+    async def async_batch_get_cache(self, keys: list, **kwargs):
+        return_val = []
+        for k in keys:
+            val = self.get_cache(key=k, **kwargs)
+            return_val.append(val)
+        return return_val
+
+    async def async_increment(self, key, value: int, **kwargs) -> int:
+        # get the value
+        init_value = await self.async_get_cache(key=key) or 0
+        value = init_value + value
+        await self.async_set_cache(key, value, **kwargs)
+        return value
 
     def flush_cache(self):
         self.cache_dict.clear()
@@ -109,6 +138,7 @@ class RedisCache(BaseCache):
         **kwargs,
     ):
         from ._redis import get_redis_client, get_redis_connection_pool
+        from litellm._service_logger import ServiceLogging
         import redis
 
         redis_kwargs = {}
@@ -119,17 +149,18 @@ class RedisCache(BaseCache):
         if password is not None:
             redis_kwargs["password"] = password
 
+        ### HEALTH MONITORING OBJECT ###
+        if kwargs.get("service_logger_obj", None) is not None and isinstance(
+            kwargs["service_logger_obj"], ServiceLogging
+        ):
+            self.service_logger_obj = kwargs.pop("service_logger_obj")
+        else:
+            self.service_logger_obj = ServiceLogging()
+
         redis_kwargs.update(kwargs)
         self.redis_client = get_redis_client(**redis_kwargs)
         self.redis_kwargs = redis_kwargs
         self.async_redis_conn_pool = get_redis_connection_pool(**redis_kwargs)
-
-        if "url" in redis_kwargs and redis_kwargs["url"] is not None:
-            parsed_kwargs = redis.connection.parse_url(redis_kwargs["url"])
-            redis_kwargs.update(parsed_kwargs)
-            self.redis_kwargs.update(parsed_kwargs)
-            # pop url
-            self.redis_kwargs.pop("url")
 
         # redis namespaces
         self.namespace = namespace
@@ -141,6 +172,16 @@ class RedisCache(BaseCache):
             self.redis_version = self.redis_client.info()["redis_version"]
         except Exception as e:
             pass
+
+        ### ASYNC HEALTH PING ###
+        try:
+            # asyncio.get_running_loop().create_task(self.ping())
+            result = asyncio.get_running_loop().create_task(self.ping())
+        except Exception:
+            pass
+
+        ### SYNC HEALTH PING ###
+        self.redis_client.ping()
 
     def init_async_client(self):
         from ._redis import get_redis_async_client
@@ -172,18 +213,101 @@ class RedisCache(BaseCache):
                 f"LiteLLM Caching: set() - Got exception from REDIS : {str(e)}"
             )
 
+    def increment_cache(self, key, value: int, **kwargs) -> int:
+        _redis_client = self.redis_client
+        start_time = time.time()
+        try:
+            result = _redis_client.incr(name=key, amount=value)
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.service_success_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    call_type="increment_cache",
+                )
+            )
+            return result
+        except Exception as e:
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_failure_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    error=e,
+                    call_type="increment_cache",
+                )
+            )
+            verbose_logger.error(
+                "LiteLLM Redis Caching: increment_cache() - Got exception from REDIS %s, Writing value=%s",
+                str(e),
+                value,
+            )
+            traceback.print_exc()
+            raise e
+
     async def async_scan_iter(self, pattern: str, count: int = 100) -> list:
-        keys = []
-        _redis_client = self.init_async_client()
-        async with _redis_client as redis_client:
-            async for key in redis_client.scan_iter(match=pattern + "*", count=count):
-                keys.append(key)
-                if len(keys) >= count:
-                    break
-        return keys
+        start_time = time.time()
+        try:
+            keys = []
+            _redis_client = self.init_async_client()
+            async with _redis_client as redis_client:
+                async for key in redis_client.scan_iter(
+                    match=pattern + "*", count=count
+                ):
+                    keys.append(key)
+                    if len(keys) >= count:
+                        break
+
+                ## LOGGING ##
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_success_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        call_type="async_scan_iter",
+                    )
+                )  # DO NOT SLOW DOWN CALL B/C OF THIS
+            return keys
+        except Exception as e:
+            # NON blocking - notify users Redis is throwing an exception
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_failure_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    error=e,
+                    call_type="async_scan_iter",
+                )
+            )
+            raise e
 
     async def async_set_cache(self, key, value, **kwargs):
-        _redis_client = self.init_async_client()
+        start_time = time.time()
+        try:
+            _redis_client = self.init_async_client()
+        except Exception as e:
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_failure_hook(
+                    service=ServiceTypes.REDIS, duration=_duration, error=e
+                )
+            )
+            # NON blocking - notify users Redis is throwing an exception
+            verbose_logger.error(
+                "LiteLLM Redis Caching: async set() - Got exception from REDIS %s, Writing value=%s",
+                str(e),
+                value,
+            )
+            traceback.print_exc()
+
         key = self.check_and_fix_namespace(key=key)
         async with _redis_client as redis_client:
             ttl = kwargs.get("ttl", None)
@@ -195,7 +319,26 @@ class RedisCache(BaseCache):
                 print_verbose(
                     f"Successfully Set ASYNC Redis Cache: key: {key}\nValue {value}\nttl={ttl}"
                 )
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_success_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        call_type="async_set_cache",
+                    )
+                )
             except Exception as e:
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_failure_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        error=e,
+                        call_type="async_set_cache",
+                    )
+                )
                 # NON blocking - notify users Redis is throwing an exception
                 verbose_logger.error(
                     "LiteLLM Redis Caching: async set() - Got exception from REDIS %s, Writing value=%s",
@@ -209,6 +352,11 @@ class RedisCache(BaseCache):
         Use Redis Pipelines for bulk write operations
         """
         _redis_client = self.init_async_client()
+        start_time = time.time()
+
+        print_verbose(
+            f"Set Async Redis Cache: key list: {cache_list}\nttl={ttl}, redis_version={self.redis_version}"
+        )
         try:
             async with _redis_client as redis_client:
                 async with redis_client.pipeline(transaction=True) as pipe:
@@ -228,8 +376,30 @@ class RedisCache(BaseCache):
 
             print_verbose(f"pipeline results: {results}")
             # Optionally, you could process 'results' to make sure that all set operations were successful.
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_success_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    call_type="async_set_cache_pipeline",
+                )
+            )
             return results
         except Exception as e:
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_failure_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    error=e,
+                    call_type="async_set_cache_pipeline",
+                )
+            )
+
             verbose_logger.error(
                 "LiteLLM Redis Caching: async set_cache_pipeline() - Got exception from REDIS %s, Writing value=%s",
                 str(e),
@@ -244,7 +414,44 @@ class RedisCache(BaseCache):
         key = self.check_and_fix_namespace(key=key)
         self.redis_batch_writing_buffer.append((key, value))
         if len(self.redis_batch_writing_buffer) >= self.redis_flush_size:
-            await self.flush_cache_buffer()
+            await self.flush_cache_buffer()  # logging done in here
+
+    async def async_increment(self, key, value: int, **kwargs) -> int:
+        _redis_client = self.init_async_client()
+        start_time = time.time()
+        try:
+            async with _redis_client as redis_client:
+                result = await redis_client.incr(name=key, amount=value)
+                ## LOGGING ##
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_success_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        call_type="async_increment",
+                    )
+                )
+                return result
+        except Exception as e:
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_failure_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    error=e,
+                    call_type="async_increment",
+                )
+            )
+            verbose_logger.error(
+                "LiteLLM Redis Caching: async async_increment() - Got exception from REDIS %s, Writing value=%s",
+                str(e),
+                value,
+            )
+            traceback.print_exc()
+            raise e
 
     async def flush_cache_buffer(self):
         print_verbose(
@@ -283,40 +490,17 @@ class RedisCache(BaseCache):
             traceback.print_exc()
             logging.debug("LiteLLM Caching: get() - Got exception from REDIS: ", e)
 
-    async def async_get_cache(self, key, **kwargs):
-        _redis_client = self.init_async_client()
-        key = self.check_and_fix_namespace(key=key)
-        async with _redis_client as redis_client:
-            try:
-                print_verbose(f"Get Async Redis Cache: key: {key}")
-                cached_response = await redis_client.get(key)
-                print_verbose(
-                    f"Got Async Redis Cache: key: {key}, cached_response {cached_response}"
-                )
-                response = self._get_cache_logic(cached_response=cached_response)
-                return response
-            except Exception as e:
-                # NON blocking - notify users Redis is throwing an exception
-                print_verbose(
-                    f"LiteLLM Caching: async get() - Got exception from REDIS: {str(e)}"
-                )
-
-    async def async_get_cache_pipeline(self, key_list) -> dict:
+    def batch_get_cache(self, key_list) -> dict:
         """
         Use Redis for bulk read operations
         """
-        _redis_client = await self.init_async_client()
         key_value_dict = {}
         try:
-            async with _redis_client as redis_client:
-                async with redis_client.pipeline(transaction=True) as pipe:
-                    # Queue the get operations in the pipeline for all keys.
-                    for cache_key in key_list:
-                        cache_key = self.check_and_fix_namespace(key=cache_key)
-                        pipe.get(cache_key)  # Queue GET command in pipeline
-
-                    # Execute the pipeline and await the results.
-                    results = await pipe.execute()
+            _keys = []
+            for cache_key in key_list:
+                cache_key = self.check_and_fix_namespace(key=cache_key)
+                _keys.append(cache_key)
+            results = self.redis_client.mget(keys=_keys)
 
             # Associate the results back with their keys.
             # 'results' is a list of values corresponding to the order of keys in 'key_list'.
@@ -332,15 +516,165 @@ class RedisCache(BaseCache):
             print_verbose(f"Error occurred in pipeline read - {str(e)}")
             return key_value_dict
 
-    async def ping(self):
+    async def async_get_cache(self, key, **kwargs):
         _redis_client = self.init_async_client()
+        key = self.check_and_fix_namespace(key=key)
+        start_time = time.time()
+        async with _redis_client as redis_client:
+            try:
+                print_verbose(f"Get Async Redis Cache: key: {key}")
+                cached_response = await redis_client.get(key)
+                print_verbose(
+                    f"Got Async Redis Cache: key: {key}, cached_response {cached_response}"
+                )
+                response = self._get_cache_logic(cached_response=cached_response)
+                ## LOGGING ##
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_success_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        call_type="async_get_cache",
+                    )
+                )
+                return response
+            except Exception as e:
+                ## LOGGING ##
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_failure_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        error=e,
+                        call_type="async_get_cache",
+                    )
+                )
+                # NON blocking - notify users Redis is throwing an exception
+                print_verbose(
+                    f"LiteLLM Caching: async get() - Got exception from REDIS: {str(e)}"
+                )
+
+    async def async_batch_get_cache(self, key_list) -> dict:
+        """
+        Use Redis for bulk read operations
+        """
+        _redis_client = await self.init_async_client()
+        key_value_dict = {}
+        start_time = time.time()
+        try:
+            async with _redis_client as redis_client:
+                _keys = []
+                for cache_key in key_list:
+                    cache_key = self.check_and_fix_namespace(key=cache_key)
+                    _keys.append(cache_key)
+                results = await redis_client.mget(keys=_keys)
+
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_success_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    call_type="async_batch_get_cache",
+                )
+            )
+
+            # Associate the results back with their keys.
+            # 'results' is a list of values corresponding to the order of keys in 'key_list'.
+            key_value_dict = dict(zip(key_list, results))
+
+            decoded_results = {}
+            for k, v in key_value_dict.items():
+                if isinstance(k, bytes):
+                    k = k.decode("utf-8")
+                v = self._get_cache_logic(v)
+                decoded_results[k] = v
+
+            return decoded_results
+        except Exception as e:
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            asyncio.create_task(
+                self.service_logger_obj.async_service_failure_hook(
+                    service=ServiceTypes.REDIS,
+                    duration=_duration,
+                    error=e,
+                    call_type="async_batch_get_cache",
+                )
+            )
+            print_verbose(f"Error occurred in pipeline read - {str(e)}")
+            return key_value_dict
+
+    def sync_ping(self) -> bool:
+        """
+        Tests if the sync redis client is correctly setup.
+        """
+        print_verbose(f"Pinging Sync Redis Cache")
+        start_time = time.time()
+        try:
+            response = self.redis_client.ping()
+            print_verbose(f"Redis Cache PING: {response}")
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            self.service_logger_obj.service_success_hook(
+                service=ServiceTypes.REDIS,
+                duration=_duration,
+                call_type="sync_ping",
+            )
+            return response
+        except Exception as e:
+            # NON blocking - notify users Redis is throwing an exception
+            ## LOGGING ##
+            end_time = time.time()
+            _duration = end_time - start_time
+            self.service_logger_obj.service_failure_hook(
+                service=ServiceTypes.REDIS,
+                duration=_duration,
+                error=e,
+                call_type="sync_ping",
+            )
+            print_verbose(
+                f"LiteLLM Redis Cache PING: - Got exception from REDIS : {str(e)}"
+            )
+            traceback.print_exc()
+            raise e
+
+    async def ping(self) -> bool:
+        _redis_client = self.init_async_client()
+        start_time = time.time()
         async with _redis_client as redis_client:
             print_verbose(f"Pinging Async Redis Cache")
             try:
                 response = await redis_client.ping()
-                print_verbose(f"Redis Cache PING: {response}")
+                ## LOGGING ##
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_success_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        call_type="async_ping",
+                    )
+                )
+                return response
             except Exception as e:
                 # NON blocking - notify users Redis is throwing an exception
+                ## LOGGING ##
+                end_time = time.time()
+                _duration = end_time - start_time
+                asyncio.create_task(
+                    self.service_logger_obj.async_service_failure_hook(
+                        service=ServiceTypes.REDIS,
+                        duration=_duration,
+                        error=e,
+                        call_type="async_ping",
+                    )
+                )
                 print_verbose(
                     f"LiteLLM Redis Cache PING: - Got exception from REDIS : {str(e)}"
                 )
@@ -871,6 +1205,30 @@ class DualCache(BaseCache):
         except Exception as e:
             print_verbose(e)
 
+    def increment_cache(
+        self, key, value: int, local_only: bool = False, **kwargs
+    ) -> int:
+        """
+        Key - the key in cache
+
+        Value - int - the value you want to increment by
+
+        Returns - int - the incremented value
+        """
+        try:
+            result: int = value
+            if self.in_memory_cache is not None:
+                result = self.in_memory_cache.increment_cache(key, value, **kwargs)
+
+            if self.redis_cache is not None and local_only == False:
+                result = self.redis_cache.increment_cache(key, value, **kwargs)
+
+            return result
+        except Exception as e:
+            print_verbose(f"LiteLLM Cache: Excepton async add_cache: {str(e)}")
+            traceback.print_exc()
+            raise e
+
     def get_cache(self, key, local_only: bool = False, **kwargs):
         # Try to fetch from in-memory cache first
         try:
@@ -893,6 +1251,39 @@ class DualCache(BaseCache):
                 result = redis_result
 
             print_verbose(f"get cache: cache result: {result}")
+            return result
+        except Exception as e:
+            traceback.print_exc()
+
+    def batch_get_cache(self, keys: list, local_only: bool = False, **kwargs):
+        try:
+            result = [None for _ in range(len(keys))]
+            if self.in_memory_cache is not None:
+                in_memory_result = self.in_memory_cache.batch_get_cache(keys, **kwargs)
+
+                print_verbose(f"in_memory_result: {in_memory_result}")
+                if in_memory_result is not None:
+                    result = in_memory_result
+
+            if None in result and self.redis_cache is not None and local_only == False:
+                """
+                - for the none values in the result
+                - check the redis cache
+                """
+                sublist_keys = [
+                    key for key, value in zip(keys, result) if value is None
+                ]
+                # If not found in in-memory cache, try fetching from Redis
+                redis_result = self.redis_cache.batch_get_cache(sublist_keys, **kwargs)
+                if redis_result is not None:
+                    # Update in-memory cache with the value from Redis
+                    for key in redis_result:
+                        self.in_memory_cache.set_cache(key, redis_result[key], **kwargs)
+
+                for key, value in redis_result.items():
+                    result[keys.index(key)] = value
+
+            print_verbose(f"async batch get cache: cache result: {result}")
             return result
         except Exception as e:
             traceback.print_exc()
@@ -930,7 +1321,50 @@ class DualCache(BaseCache):
         except Exception as e:
             traceback.print_exc()
 
+    async def async_batch_get_cache(
+        self, keys: list, local_only: bool = False, **kwargs
+    ):
+        try:
+            result = [None for _ in range(len(keys))]
+            if self.in_memory_cache is not None:
+                in_memory_result = await self.in_memory_cache.async_batch_get_cache(
+                    keys, **kwargs
+                )
+
+                if in_memory_result is not None:
+                    result = in_memory_result
+            if None in result and self.redis_cache is not None and local_only == False:
+                """
+                - for the none values in the result
+                - check the redis cache
+                """
+                sublist_keys = [
+                    key for key, value in zip(keys, result) if value is None
+                ]
+                # If not found in in-memory cache, try fetching from Redis
+                redis_result = await self.redis_cache.async_batch_get_cache(
+                    sublist_keys, **kwargs
+                )
+
+                if redis_result is not None:
+                    # Update in-memory cache with the value from Redis
+                    for key, value in redis_result.items():
+                        if value is not None:
+                            await self.in_memory_cache.async_set_cache(
+                                key, redis_result[key], **kwargs
+                            )
+                for key, value in redis_result.items():
+                    index = keys.index(key)
+                    result[index] = value
+
+            return result
+        except Exception as e:
+            traceback.print_exc()
+
     async def async_set_cache(self, key, value, local_only: bool = False, **kwargs):
+        print_verbose(
+            f"async set cache: cache key: {key}; local_only: {local_only}; value: {value}"
+        )
         try:
             if self.in_memory_cache is not None:
                 await self.in_memory_cache.async_set_cache(key, value, **kwargs)
@@ -940,6 +1374,32 @@ class DualCache(BaseCache):
         except Exception as e:
             print_verbose(f"LiteLLM Cache: Excepton async add_cache: {str(e)}")
             traceback.print_exc()
+
+    async def async_increment_cache(
+        self, key, value: int, local_only: bool = False, **kwargs
+    ) -> int:
+        """
+        Key - the key in cache
+
+        Value - int - the value you want to increment by
+
+        Returns - int - the incremented value
+        """
+        try:
+            result: int = value
+            if self.in_memory_cache is not None:
+                result = await self.in_memory_cache.async_increment(
+                    key, value, **kwargs
+                )
+
+            if self.redis_cache is not None and local_only == False:
+                result = await self.redis_cache.async_increment(key, value, **kwargs)
+
+            return result
+        except Exception as e:
+            print_verbose(f"LiteLLM Cache: Excepton async add_cache: {str(e)}")
+            traceback.print_exc()
+            raise e
 
     def flush_cache(self):
         if self.in_memory_cache is not None:

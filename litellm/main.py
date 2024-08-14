@@ -12,7 +12,6 @@ from typing import Any, Literal, Union, BinaryIO
 from functools import partial
 import dotenv, traceback, random, asyncio, time, contextvars
 from copy import deepcopy
-
 import httpx
 import litellm
 from ._logging import verbose_logger
@@ -39,7 +38,6 @@ from litellm.utils import (
     get_optional_params_image_gen,
 )
 from .llms import (
-    anthropic,
     anthropic_text,
     together_ai,
     ai21,
@@ -68,6 +66,8 @@ from .llms import (
 from .llms.openai import OpenAIChatCompletion, OpenAITextCompletion
 from .llms.azure import AzureChatCompletion
 from .llms.azure_text import AzureTextCompletion
+from .llms.anthropic import AnthropicChatCompletion
+from .llms.anthropic_text import AnthropicTextCompletion
 from .llms.huggingface_restapi import Huggingface
 from .llms.prompt_templates.factory import (
     prompt_factory,
@@ -99,6 +99,8 @@ from litellm.utils import (
 dotenv.load_dotenv()  # Loading env variables using dotenv
 openai_chat_completions = OpenAIChatCompletion()
 openai_text_completions = OpenAITextCompletion()
+anthropic_chat_completions = AnthropicChatCompletion()
+anthropic_text_completions = AnthropicTextCompletion()
 azure_chat_completions = AzureChatCompletion()
 azure_text_completions = AzureTextCompletion()
 huggingface = Huggingface()
@@ -304,6 +306,7 @@ async def acompletion(
             or custom_llm_provider == "vertex_ai"
             or custom_llm_provider == "gemini"
             or custom_llm_provider == "sagemaker"
+            or custom_llm_provider == "anthropic"
             or custom_llm_provider in litellm.openai_compatible_providers
         ):  # currently implemented aiohttp calls for just azure, openai, hf, ollama, vertex ai soon all.
             init_response = await loop.run_in_executor(None, func_with_context)
@@ -315,6 +318,14 @@ async def acompletion(
                 response = await init_response
             else:
                 response = init_response  # type: ignore
+
+            if custom_llm_provider == "text-completion-openai" and isinstance(
+                response, TextCompletionResponse
+            ):
+                response = litellm.OpenAITextCompletionConfig().convert_to_chat_model_response_object(
+                    response_object=response,
+                    model_response_object=litellm.ModelResponse(),
+                )
         else:
             # Call the synchronous function using run_in_executor
             response = await loop.run_in_executor(None, func_with_context)  # type: ignore
@@ -330,6 +341,7 @@ async def acompletion(
             custom_llm_provider=custom_llm_provider,
             original_exception=e,
             completion_kwargs=completion_kwargs,
+            extra_kwargs=kwargs,
         )
 
 
@@ -596,6 +608,7 @@ def completion(
         "client",
         "rpm",
         "tpm",
+        "max_parallel_requests",
         "input_cost_per_token",
         "output_cost_per_token",
         "input_cost_per_second",
@@ -1156,10 +1169,11 @@ def completion(
                     or get_secret("ANTHROPIC_API_BASE")
                     or "https://api.anthropic.com/v1/complete"
                 )
-                response = anthropic_text.completion(
+                response = anthropic_text_completions.completion(
                     model=model,
                     messages=messages,
                     api_base=api_base,
+                    acompletion=acompletion,
                     custom_prompt_dict=litellm.custom_prompt_dict,
                     model_response=model_response,
                     print_verbose=print_verbose,
@@ -1180,10 +1194,11 @@ def completion(
                     or get_secret("ANTHROPIC_API_BASE")
                     or "https://api.anthropic.com/v1/messages"
                 )
-                response = anthropic.completion(
+                response = anthropic_chat_completions.completion(
                     model=model,
                     messages=messages,
                     api_base=api_base,
+                    acompletion=acompletion,
                     custom_prompt_dict=litellm.custom_prompt_dict,
                     model_response=model_response,
                     print_verbose=print_verbose,
@@ -1195,19 +1210,6 @@ def completion(
                     logging_obj=logging,
                     headers=headers,
                 )
-            if (
-                "stream" in optional_params
-                and optional_params["stream"] == True
-                and not isinstance(response, CustomStreamWrapper)
-            ):
-                # don't try to access stream object,
-                response = CustomStreamWrapper(
-                    response,
-                    model,
-                    custom_llm_provider="anthropic",
-                    logging_obj=logging,
-                )
-
             if optional_params.get("stream", False) or acompletion == True:
                 ## LOGGING
                 logging.post_call(
@@ -1676,19 +1678,25 @@ def completion(
                 or litellm.vertex_location
                 or get_secret("VERTEXAI_LOCATION")
             )
-
+            vertex_credentials = (
+                optional_params.pop("vertex_credentials", None)
+                or optional_params.pop("vertex_ai_credentials", None)
+                or get_secret("VERTEXAI_CREDENTIALS")
+            )
+            new_params = deepcopy(optional_params)
             if "claude-3" in model:
                 model_response = vertex_ai_anthropic.completion(
                     model=model,
                     messages=messages,
                     model_response=model_response,
                     print_verbose=print_verbose,
-                    optional_params=optional_params,
+                    optional_params=new_params,
                     litellm_params=litellm_params,
                     logger_fn=logger_fn,
                     encoding=encoding,
                     vertex_location=vertex_ai_location,
                     vertex_project=vertex_ai_project,
+                    vertex_credentials=vertex_credentials,
                     logging_obj=logging,
                     acompletion=acompletion,
                 )
@@ -1698,12 +1706,13 @@ def completion(
                     messages=messages,
                     model_response=model_response,
                     print_verbose=print_verbose,
-                    optional_params=optional_params,
+                    optional_params=new_params,
                     litellm_params=litellm_params,
                     logger_fn=logger_fn,
                     encoding=encoding,
                     vertex_location=vertex_ai_location,
                     vertex_project=vertex_ai_project,
+                    vertex_credentials=vertex_credentials,
                     logging_obj=logging,
                     acompletion=acompletion,
                 )
@@ -1933,9 +1942,16 @@ def completion(
                 or "http://localhost:11434"
             )
 
+            api_key = (
+                api_key
+                or litellm.ollama_key
+                or os.environ.get("OLLAMA_API_KEY")
+                or litellm.api_key
+            )
             ## LOGGING
             generator = ollama_chat.get_ollama_response(
                 api_base,
+                api_key,
                 model,
                 messages,
                 optional_params,
@@ -2131,6 +2147,7 @@ def completion(
             custom_llm_provider=custom_llm_provider,
             original_exception=e,
             completion_kwargs=args,
+            extra_kwargs=kwargs,
         )
 
 
@@ -2492,6 +2509,7 @@ async def aembedding(*args, **kwargs):
             custom_llm_provider=custom_llm_provider,
             original_exception=e,
             completion_kwargs=args,
+            extra_kwargs=kwargs,
         )
 
 
@@ -2543,6 +2561,7 @@ def embedding(
     client = kwargs.pop("client", None)
     rpm = kwargs.pop("rpm", None)
     tpm = kwargs.pop("tpm", None)
+    max_parallel_requests = kwargs.pop("max_parallel_requests", None)
     model_info = kwargs.get("model_info", None)
     metadata = kwargs.get("metadata", None)
     encoding_format = kwargs.get("encoding_format", None)
@@ -2600,6 +2619,7 @@ def embedding(
         "client",
         "rpm",
         "tpm",
+        "max_parallel_requests",
         "input_cost_per_token",
         "output_cost_per_token",
         "input_cost_per_second",
@@ -2801,6 +2821,11 @@ def embedding(
                 or litellm.vertex_location
                 or get_secret("VERTEXAI_LOCATION")
             )
+            vertex_credentials = (
+                optional_params.pop("vertex_credentials", None)
+                or optional_params.pop("vertex_ai_credentials", None)
+                or get_secret("VERTEXAI_CREDENTIALS")
+            )
 
             response = vertex_ai.embedding(
                 model=model,
@@ -2811,6 +2836,7 @@ def embedding(
                 model_response=EmbeddingResponse(),
                 vertex_project=vertex_ai_project,
                 vertex_location=vertex_ai_location,
+                vertex_credentials=vertex_credentials,
                 aembedding=aembedding,
                 print_verbose=print_verbose,
             )
@@ -2927,7 +2953,10 @@ def embedding(
         )
         ## Map to OpenAI Exception
         raise exception_type(
-            model=model, original_exception=e, custom_llm_provider=custom_llm_provider
+            model=model,
+            original_exception=e,
+            custom_llm_provider=custom_llm_provider,
+            extra_kwargs=kwargs,
         )
 
 
@@ -3021,6 +3050,7 @@ async def atext_completion(*args, **kwargs):
             custom_llm_provider=custom_llm_provider,
             original_exception=e,
             completion_kwargs=args,
+            extra_kwargs=kwargs,
         )
 
 
@@ -3358,6 +3388,7 @@ async def aimage_generation(*args, **kwargs):
             custom_llm_provider=custom_llm_provider,
             original_exception=e,
             completion_kwargs=args,
+            extra_kwargs=kwargs,
         )
 
 
@@ -3448,6 +3479,7 @@ def image_generation(
             "client",
             "rpm",
             "tpm",
+            "max_parallel_requests",
             "input_cost_per_token",
             "output_cost_per_token",
             "hf_model_name",
@@ -3557,6 +3589,7 @@ def image_generation(
             custom_llm_provider=custom_llm_provider,
             original_exception=e,
             completion_kwargs=locals(),
+            extra_kwargs=kwargs,
         )
 
 
@@ -3606,6 +3639,7 @@ async def atranscription(*args, **kwargs):
             custom_llm_provider=custom_llm_provider,
             original_exception=e,
             completion_kwargs=args,
+            extra_kwargs=kwargs,
         )
 
 
@@ -3786,6 +3820,9 @@ async def ahealth_check(
 
             api_base = model_params.get("api_base") or get_secret("OPENAI_API_BASE")
 
+            if custom_llm_provider == "text-completion-openai":
+                mode = "completion"
+
             response = await openai_chat_completions.ahealth_check(
                 model=model,
                 messages=model_params.get(
@@ -3819,11 +3856,15 @@ async def ahealth_check(
         return response
     except Exception as e:
         traceback.print_exc()
+        stack_trace = traceback.format_exc()
+        if isinstance(stack_trace, str):
+            stack_trace = stack_trace[:1000]
         if model not in litellm.model_cost and mode is None:
             raise Exception(
                 "Missing `mode`. Set the `mode` for the model - https://docs.litellm.ai/docs/proxy/health#embedding-models"
             )
-        return {"error": f"{str(e)}"}
+        error_to_return = str(e) + " stack trace: " + stack_trace
+        return {"error": error_to_return}
 
 
 ####### HELPER FUNCTIONS ################
