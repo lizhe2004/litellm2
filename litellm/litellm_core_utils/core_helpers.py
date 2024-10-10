@@ -1,9 +1,16 @@
 # What is this?
 ## Helper utilities
 import os
-from typing import BinaryIO, List, Literal, Optional, Tuple
+from typing import TYPE_CHECKING, Any, List, Literal, Optional, Tuple, Union
 
 from litellm._logging import verbose_logger
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span as _Span
+
+    Span = _Span
+else:
+    Span = Any
 
 
 def map_finish_reason(
@@ -68,10 +75,12 @@ def get_litellm_metadata_from_kwargs(kwargs: dict):
 
 
 # Helper functions used for OTEL logging
-def _get_parent_otel_span_from_kwargs(kwargs: Optional[dict] = None):
+def _get_parent_otel_span_from_kwargs(
+    kwargs: Optional[dict] = None,
+) -> Union[Span, None]:
     try:
         if kwargs is None:
-            return None
+            raise ValueError("kwargs is None")
         litellm_params = kwargs.get("litellm_params")
         _metadata = kwargs.get("metadata") or {}
         if "litellm_parent_otel_span" in _metadata:
@@ -84,22 +93,9 @@ def _get_parent_otel_span_from_kwargs(kwargs: Optional[dict] = None):
             return litellm_params["metadata"]["litellm_parent_otel_span"]
         elif "litellm_parent_otel_span" in kwargs:
             return kwargs["litellm_parent_otel_span"]
-    except:
         return None
-
-
-def get_file_check_sum(_file: BinaryIO):
-    """
-    Helper to safely get file checksum - used as a cache key
-    """
-    try:
-        file_descriptor = _file.fileno()
-        file_stat = os.fstat(file_descriptor)
-        file_size = str(file_stat.st_size)
-        file_checksum = _file.name + file_size
-        return file_checksum
     except Exception as e:
-        verbose_logger.error(f"Error getting file_checksum: {(str(e))}")
-        file_checksum = _file.name
-        return file_checksum
-    return file_checksum
+        verbose_logger.exception(
+            "Error in _get_parent_otel_span_from_kwargs: " + str(e)
+        )
+        return None

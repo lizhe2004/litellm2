@@ -71,7 +71,7 @@ class AzureOpenAIFilesAPI(BaseLLM):
         self,
         _is_async: bool,
         create_file_data: CreateFileRequest,
-        api_base: str,
+        api_base: Optional[str],
         api_key: Optional[str],
         api_version: Optional[str],
         timeout: Union[float, httpx.Timeout],
@@ -117,11 +117,10 @@ class AzureOpenAIFilesAPI(BaseLLM):
         self,
         _is_async: bool,
         file_content_request: FileContentRequest,
-        api_base: str,
+        api_base: Optional[str],
         api_key: Optional[str],
         timeout: Union[float, httpx.Timeout],
         max_retries: Optional[int],
-        organization: Optional[str],
         api_version: Optional[str] = None,
         client: Optional[Union[AzureOpenAI, AsyncAzureOpenAI]] = None,
     ) -> Union[
@@ -134,7 +133,7 @@ class AzureOpenAIFilesAPI(BaseLLM):
                 timeout=timeout,
                 api_version=api_version,
                 max_retries=max_retries,
-                organization=organization,
+                organization=None,
                 client=client,
                 _is_async=_is_async,
             )
@@ -169,11 +168,10 @@ class AzureOpenAIFilesAPI(BaseLLM):
         self,
         _is_async: bool,
         file_id: str,
-        api_base: str,
+        api_base: Optional[str],
         api_key: Optional[str],
         timeout: Union[float, httpx.Timeout],
         max_retries: Optional[int],
-        organization: Optional[str],
         api_version: Optional[str] = None,
         client: Optional[Union[AzureOpenAI, AsyncAzureOpenAI]] = None,
     ):
@@ -183,7 +181,7 @@ class AzureOpenAIFilesAPI(BaseLLM):
                 api_base=api_base,
                 timeout=timeout,
                 max_retries=max_retries,
-                organization=organization,
+                organization=None,
                 api_version=api_version,
                 client=client,
                 _is_async=_is_async,
@@ -213,13 +211,16 @@ class AzureOpenAIFilesAPI(BaseLLM):
         openai_client: AsyncAzureOpenAI,
     ) -> FileDeleted:
         response = await openai_client.files.delete(file_id=file_id)
+
+        if not isinstance(response, FileDeleted):  # azure returns an empty string
+            return FileDeleted(id=file_id, deleted=True, object="file")
         return response
 
     def delete_file(
         self,
         _is_async: bool,
         file_id: str,
-        api_base: str,
+        api_base: Optional[str],
         api_key: Optional[str],
         timeout: Union[float, httpx.Timeout],
         max_retries: Optional[int],
@@ -255,6 +256,9 @@ class AzureOpenAIFilesAPI(BaseLLM):
             )
         response = openai_client.files.delete(file_id=file_id)
 
+        if not isinstance(response, FileDeleted):  # azure returns an empty string
+            return FileDeleted(id=file_id, deleted=True, object="file")
+
         return response
 
     async def alist_files(
@@ -271,11 +275,10 @@ class AzureOpenAIFilesAPI(BaseLLM):
     def list_files(
         self,
         _is_async: bool,
-        api_base: str,
+        api_base: Optional[str],
         api_key: Optional[str],
         timeout: Union[float, httpx.Timeout],
         max_retries: Optional[int],
-        organization: Optional[str],
         purpose: Optional[str] = None,
         api_version: Optional[str] = None,
         client: Optional[Union[AzureOpenAI, AsyncAzureOpenAI]] = None,
@@ -286,7 +289,7 @@ class AzureOpenAIFilesAPI(BaseLLM):
                 api_base=api_base,
                 timeout=timeout,
                 max_retries=max_retries,
-                organization=organization,
+                organization=None,  # openai param
                 api_version=api_version,
                 client=client,
                 _is_async=_is_async,

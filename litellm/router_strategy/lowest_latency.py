@@ -1,16 +1,16 @@
 #### What this does ####
 #   picks based on response time (for streaming, this is time to first token)
-from pydantic import BaseModel
 import random
-from typing import Optional, Union, List, Dict
-from datetime import datetime, timedelta
 import traceback
+from datetime import datetime, timedelta
+from typing import Dict, List, Optional, Union
+
+from pydantic import BaseModel
+
+import litellm
+from litellm import ModelResponse, token_counter, verbose_logger
 from litellm.caching import DualCache
 from litellm.integrations.custom_logger import CustomLogger
-from litellm import ModelResponse
-from litellm import token_counter
-import litellm
-from litellm import verbose_logger
 
 
 class LiteLLMBase(BaseModel):
@@ -18,10 +18,10 @@ class LiteLLMBase(BaseModel):
     Implements default functions, all pydantic objects should have.
     """
 
-    def json(self, **kwargs):
+    def json(self, **kwargs):  # type: ignore
         try:
             return self.model_dump()  # noqa
-        except:
+        except Exception:
             # if using pydantic v1
             return self.dict()
 
@@ -85,26 +85,30 @@ class LowestLatencyLoggingHandler(CustomLogger):
                 response_ms: timedelta = end_time - start_time
                 time_to_first_token_response_time: Optional[timedelta] = None
 
-                if kwargs.get("stream", None) is not None and kwargs["stream"] == True:
+                if kwargs.get("stream", None) is not None and kwargs["stream"] is True:
                     # only log ttft for streaming request
                     time_to_first_token_response_time = (
                         kwargs.get("completion_start_time", end_time) - start_time
                     )
 
-                final_value = response_ms
+                final_value: Union[float, timedelta] = response_ms
                 time_to_first_token: Optional[float] = None
                 total_tokens = 0
 
                 if isinstance(response_obj, ModelResponse):
-                    completion_tokens = response_obj.usage.completion_tokens
-                    total_tokens = response_obj.usage.total_tokens
-                    final_value = float(response_ms.total_seconds() / completion_tokens)
-
-                    if time_to_first_token_response_time is not None:
-                        time_to_first_token = float(
-                            time_to_first_token_response_time.total_seconds()
-                            / completion_tokens
+                    _usage = getattr(response_obj, "usage", None)
+                    if _usage is not None:
+                        completion_tokens = _usage.completion_tokens
+                        total_tokens = _usage.total_tokens
+                        final_value = float(
+                            response_ms.total_seconds() / completion_tokens
                         )
+
+                        if time_to_first_token_response_time is not None:
+                            time_to_first_token = float(
+                                time_to_first_token_response_time.total_seconds()
+                                / completion_tokens
+                            )
 
                 # ------------
                 # Update usage
@@ -165,12 +169,11 @@ class LowestLatencyLoggingHandler(CustomLogger):
                 if self.test_flag:
                     self.logged_success += 1
         except Exception as e:
-            verbose_logger.error(
+            verbose_logger.exception(
                 "litellm.proxy.hooks.prompt_injection_detection.py::async_pre_call_hook(): Exception occured - {}".format(
                     str(e)
                 )
             )
-            verbose_logger.debug(traceback.format_exc())
             pass
 
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
@@ -234,12 +237,11 @@ class LowestLatencyLoggingHandler(CustomLogger):
                 # do nothing if it's not a timeout error
                 return
         except Exception as e:
-            verbose_logger.error(
+            verbose_logger.exception(
                 "litellm.proxy.hooks.prompt_injection_detection.py::async_pre_call_hook(): Exception occured - {}".format(
                     str(e)
                 )
             )
-            verbose_logger.debug(traceback.format_exc())
             pass
 
     async def async_log_success_event(self, kwargs, response_obj, start_time, end_time):
@@ -283,26 +285,30 @@ class LowestLatencyLoggingHandler(CustomLogger):
 
                 response_ms: timedelta = end_time - start_time
                 time_to_first_token_response_time: Optional[timedelta] = None
-                if kwargs.get("stream", None) is not None and kwargs["stream"] == True:
+                if kwargs.get("stream", None) is not None and kwargs["stream"] is True:
                     # only log ttft for streaming request
                     time_to_first_token_response_time = (
                         kwargs.get("completion_start_time", end_time) - start_time
                     )
 
-                final_value = response_ms
+                final_value: Union[float, timedelta] = response_ms
                 total_tokens = 0
                 time_to_first_token: Optional[float] = None
 
                 if isinstance(response_obj, ModelResponse):
-                    completion_tokens = response_obj.usage.completion_tokens
-                    total_tokens = response_obj.usage.total_tokens
-                    final_value = float(response_ms.total_seconds() / completion_tokens)
-
-                    if time_to_first_token_response_time is not None:
-                        time_to_first_token = float(
-                            time_to_first_token_response_time.total_seconds()
-                            / completion_tokens
+                    _usage = getattr(response_obj, "usage", None)
+                    if _usage is not None:
+                        completion_tokens = _usage.completion_tokens
+                        total_tokens = _usage.total_tokens
+                        final_value = float(
+                            response_ms.total_seconds() / completion_tokens
                         )
+
+                        if time_to_first_token_response_time is not None:
+                            time_to_first_token = float(
+                                time_to_first_token_response_time.total_seconds()
+                                / completion_tokens
+                            )
                 # ------------
                 # Update usage
                 # ------------
@@ -362,12 +368,11 @@ class LowestLatencyLoggingHandler(CustomLogger):
                 if self.test_flag:
                     self.logged_success += 1
         except Exception as e:
-            verbose_logger.error(
+            verbose_logger.exception(
                 "litellm.router_strategy.lowest_latency.py::async_log_success_event(): Exception occured - {}".format(
                     str(e)
                 )
             )
-            verbose_logger.debug(traceback.format_exc())
             pass
 
     def get_available_deployments(
@@ -413,7 +418,7 @@ class LowestLatencyLoggingHandler(CustomLogger):
 
         try:
             input_tokens = token_counter(messages=messages, text=input)
-        except:
+        except Exception:
             input_tokens = 0
 
         # randomly sample from all_deployments, incase all deployments have latency=0.0
@@ -457,7 +462,7 @@ class LowestLatencyLoggingHandler(CustomLogger):
             if (
                 request_kwargs is not None
                 and request_kwargs.get("stream", None) is not None
-                and request_kwargs["stream"] == True
+                and request_kwargs["stream"] is True
                 and len(item_ttft_latency) > 0
             ):
                 for _call_latency in item_ttft_latency:

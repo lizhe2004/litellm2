@@ -1,7 +1,7 @@
 import Tabs from '@theme/Tabs';
 import TabItem from '@theme/TabItem';
 
-# 💡 Migrating from OpenAI (Langchain, OpenAI SDK, LlamaIndex, Instructor, Curl)
+# Langchain, OpenAI SDK, LlamaIndex, Instructor, Curl examples
 
 LiteLLM Proxy is **OpenAI-Compatible**, and supports:
 * /chat/completions 
@@ -810,6 +810,9 @@ print(result)
 </TabItem>
 </Tabs>
 
+## Using with Vertex, Boto3, Anthropic SDK (Native format)
+
+👉 **[Here's how to use litellm proxy with Vertex, boto3, Anthropic SDK - in the native format](../pass_through/vertex_ai.md)**
 
 ## Advanced
 
@@ -1142,10 +1145,31 @@ main();
 
 </Tabs>
 
-### Pass User LLM API Keys
-Allows your users to pass in their OpenAI API key (any LiteLLM supported provider) to make requests 
+### Pass User LLM API Keys / API Base
+Allows your users to pass in their OpenAI API key/API base (any LiteLLM supported provider) to make requests 
 
 Here's how to do it: 
+
+#### 1. Enable configurable clientside auth credentials for a provider
+
+```yaml
+model_list:
+  - model_name: "fireworks_ai/*"
+    litellm_params:
+      model: "fireworks_ai/*"
+      configurable_clientside_auth_params: ["api_base"]
+```
+
+Specify any/all auth params you want the user to be able to configure:
+
+- api_base
+- api_key
+- base_url 
+
+(check [provider docs](../providers/) for provider-specific auth params - e.g. `vertex_project`)
+
+
+#### 2. Test it!
 
 ```python
 import openai

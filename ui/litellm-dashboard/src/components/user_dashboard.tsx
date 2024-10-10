@@ -23,10 +23,19 @@ if (isLocal != true) {
 console.log("isLocal:", isLocal);
 const proxyBaseUrl = isLocal ? "http://localhost:4000" : null;
 
-type UserSpendData = {
-  spend: number;
+export interface ProxySettings {
+  PROXY_BASE_URL: string | null;
+  PROXY_LOGOUT_URL: string | null;
+  DEFAULT_TEAM_DISABLED: boolean;
+  SSO_ENABLED: boolean;
+}
+
+
+export type UserInfo = {
+  models: string[];
   max_budget?: number | null;
-};
+  spend: number;
+}
 
 function getCookie(name: string) {
   console.log("COOKIES", document.cookie)
@@ -46,8 +55,7 @@ interface UserDashboardProps {
   setUserEmail: React.Dispatch<React.SetStateAction<string | null>>;
   setTeams: React.Dispatch<React.SetStateAction<Object[] | null>>;
   setKeys: React.Dispatch<React.SetStateAction<Object[] | null>>;
-  setProxySettings: React.Dispatch<React.SetStateAction<any>>;
-  proxySettings: any;
+  premiumUser: boolean;
 }
 
 type TeamInterface = {
@@ -66,10 +74,9 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
   setUserEmail,
   setTeams,
   setKeys,
-  setProxySettings,
-  proxySettings,
+  premiumUser,
 }) => {
-  const [userSpendData, setUserSpendData] = useState<UserSpendData | null>(
+  const [userSpendData, setUserSpendData] = useState<UserInfo | null>(
     null
   );
 
@@ -85,6 +92,7 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
   const [accessToken, setAccessToken] = useState<string | null>(null);
   const [teamSpend, setTeamSpend] = useState<number | null>(null);
   const [userModels, setUserModels] = useState<string[]>([]);
+  const [proxySettings, setProxySettings] = useState<ProxySettings | null>(null);
   const defaultTeam: TeamInterface = {
     models: [],
     team_alias: "Default Team",
@@ -164,7 +172,7 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
       } else {
         const fetchData = async () => {
           try {
-            const proxy_settings = await getProxyBaseUrlAndLogoutUrl(accessToken);
+            const proxy_settings: ProxySettings = await getProxyBaseUrlAndLogoutUrl(accessToken);
             setProxySettings(proxy_settings);
 
             const response = await userInfoCall(
@@ -180,13 +188,9 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
                 response
               )}; team values: ${Object.entries(response.teams)}`
             );
-            if (userRole == "Admin") {
-              const globalSpend = await getTotalSpendCall(accessToken);
-              setUserSpendData(globalSpend);
-              console.log("globalSpend:", globalSpend);
-            } else {
-              setUserSpendData(response["user_info"]);
-            }
+
+            setUserSpendData(response["user_info"]);
+            console.log(`userSpendData: ${JSON.stringify(userSpendData)}`)
             setKeys(response["keys"]); // Assuming this is the correct path to your data
             setTeams(response["teams"]);
             const teamsArray = [...response["teams"]];
@@ -328,6 +332,7 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
             selectedTeam={selectedTeam ? selectedTeam : null}
             data={keys}
             setData={setKeys}
+            premiumUser={premiumUser}
             teams={teams}
           />
           <CreateKey
@@ -343,6 +348,10 @@ const UserDashboard: React.FC<UserDashboardProps> = ({
             teams={teams}
             setSelectedTeam={setSelectedTeam}
             userRole={userRole}
+            proxySettings={proxySettings}
+            setProxySettings={setProxySettings}
+            userInfo={userSpendData}
+            accessToken={accessToken}
           />
         </Col>
       </Grid>

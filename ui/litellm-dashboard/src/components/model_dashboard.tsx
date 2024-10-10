@@ -145,6 +145,7 @@ enum Providers {
   Bedrock = "Amazon Bedrock",
   Groq = "Groq",
   MistralAI = "Mistral AI",
+  Deepseek = "Deepseek",
   OpenAI_Compatible = "OpenAI-Compatible Endpoints (Together AI, etc.)",
   Vertex_AI = "Vertex AI (Anthropic, Gemini, etc.)",
   Cohere = "Cohere",
@@ -165,6 +166,7 @@ const provider_map: Record<string, string> = {
   OpenAI_Compatible: "openai",
   Vertex_AI: "vertex_ai",
   Databricks: "databricks",
+  Deepseek: "deepseek",
   Ollama: "ollama",
 
 };
@@ -457,19 +459,19 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
             </Form.Item>
 
             <Form.Item
-              label="input_cost_per_token"
-              name="input_cost_per_token"
-              tooltip="float (optional) - Input cost per token"
+              label="Input Cost per 1M Tokens"
+              name="input_cost_per_million_tokens"
+              tooltip="float (optional) - Input cost per 1 million tokens"
             >
-              <InputNumber min={0} step={0.0001} />
+              <InputNumber min={0} step={0.01} />
             </Form.Item>
 
             <Form.Item
-              label="output_cost_per_token"
-              name="output_cost_per_token"
-              tooltip="float (optional) - Output cost per token"
+              label="Output Cost per 1M Tokens"
+              name="output_cost_per_million_tokens"
+              tooltip="float (optional) - Output cost per 1 million tokens"
             >
-              <InputNumber min={0} step={0.0001} />
+              <InputNumber min={0} step={0.01} />
             </Form.Item>
 
             <Form.Item
@@ -516,6 +518,15 @@ const ModelDashboard: React.FC<ModelDashboardProps> = ({
 
     let newLiteLLMParams: Record<string, any> = {};
     let model_info_model_id = null;
+
+    if (formValues.input_cost_per_million_tokens) {
+      formValues.input_cost_per_token = formValues.input_cost_per_million_tokens / 1000000;
+      delete formValues.input_cost_per_million_tokens;
+    }
+    if (formValues.output_cost_per_million_tokens) {
+      formValues.output_cost_per_token = formValues.output_cost_per_million_tokens / 1000000;
+      delete formValues.output_cost_per_million_tokens;
+    }
 
     for (const [key, value] of Object.entries(formValues)) {
       if (key !== "model_id") {
