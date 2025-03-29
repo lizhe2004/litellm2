@@ -2350,6 +2350,8 @@ def completion(  # type: ignore # noqa: PLR0915
                 or litellm.api_key
             )
 
+            api_base = api_base or litellm.api_base or get_secret("GEMINI_API_BASE")
+
             new_params = deepcopy(optional_params)
             response = vertex_chat_completion.completion(  # type: ignore
                 model=model,
@@ -2391,6 +2393,8 @@ def completion(  # type: ignore # noqa: PLR0915
                 or optional_params.pop("vertex_ai_credentials", None)
                 or get_secret("VERTEXAI_CREDENTIALS")
             )
+
+            api_base = api_base or litellm.api_base or get_secret("VERTEXAI_API_BASE")
 
             new_params = deepcopy(optional_params)
             if (
@@ -3657,6 +3661,8 @@ def embedding(  # noqa: PLR0915
                 api_key or get_secret_str("GEMINI_API_KEY") or litellm.api_key
             )
 
+            api_base = api_base or litellm.api_base or get_secret_str("GEMINI_API_BASE")
+
             response = google_batch_embeddings.batch_embeddings(  # type: ignore
                 model=model,
                 input=input,
@@ -3671,6 +3677,8 @@ def embedding(  # noqa: PLR0915
                 print_verbose=print_verbose,
                 custom_llm_provider="gemini",
                 api_key=gemini_api_key,
+                api_base=api_base,
+                client=client,
             )
 
         elif custom_llm_provider == "vertex_ai":
@@ -3695,6 +3703,13 @@ def embedding(  # noqa: PLR0915
                 or get_secret_str("VERTEX_CREDENTIALS")
             )
 
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret_str("VERTEXAI_API_BASE")
+                or get_secret_str("VERTEX_API_BASE")
+            )
+
             if (
                 "image" in optional_params
                 or "video" in optional_params
@@ -3708,6 +3723,7 @@ def embedding(  # noqa: PLR0915
                     encoding=encoding,
                     logging_obj=logging,
                     optional_params=optional_params,
+                    litellm_params=litellm_params_dict,
                     model_response=EmbeddingResponse(),
                     vertex_project=vertex_ai_project,
                     vertex_location=vertex_ai_location,
@@ -3715,6 +3731,8 @@ def embedding(  # noqa: PLR0915
                     aembedding=aembedding,
                     print_verbose=print_verbose,
                     custom_llm_provider="vertex_ai",
+                    client=client,
+                    api_base=api_base,
                 )
             else:
                 response = vertex_embedding.embedding(
@@ -3732,6 +3750,8 @@ def embedding(  # noqa: PLR0915
                     aembedding=aembedding,
                     print_verbose=print_verbose,
                     api_key=api_key,
+                    api_base=api_base,
+                    client=client,
                 )
         elif custom_llm_provider == "oobabooga":
             response = oobabooga.embedding(
@@ -4694,6 +4714,14 @@ def image_generation(  # noqa: PLR0915
                 or optional_params.pop("vertex_ai_credentials", None)
                 or get_secret_str("VERTEXAI_CREDENTIALS")
             )
+
+            api_base = (
+                api_base
+                or litellm.api_base
+                or get_secret_str("VERTEXAI_API_BASE")
+                or get_secret_str("VERTEX_API_BASE")
+            )
+
             model_response = vertex_image_generation.image_generation(
                 model=model,
                 prompt=prompt,
@@ -4705,6 +4733,8 @@ def image_generation(  # noqa: PLR0915
                 vertex_location=vertex_ai_location,
                 vertex_credentials=vertex_credentials,
                 aimg_generation=aimg_generation,
+                api_base=api_base,
+                client=client,
             )
         elif (
             custom_llm_provider in litellm._custom_providers
@@ -5066,6 +5096,12 @@ def transcription(
     response: Optional[
         Union[TranscriptionResponse, Coroutine[Any, Any, TranscriptionResponse]]
     ] = None
+
+    provider_config = ProviderConfigManager.get_provider_audio_transcription_config(
+        model=model,
+        provider=LlmProviders(custom_llm_provider),
+    )
+
     if custom_llm_provider == "azure":
         # azure configs
         api_base = api_base or litellm.api_base or get_secret_str("AZURE_API_BASE")
@@ -5132,12 +5168,15 @@ def transcription(
             max_retries=max_retries,
             api_base=api_base,
             api_key=api_key,
+            provider_config=provider_config,
+            litellm_params=litellm_params_dict,
         )
     elif custom_llm_provider == "deepgram":
         response = base_llm_http_handler.audio_transcriptions(
             model=model,
             audio_file=file,
             optional_params=optional_params,
+            litellm_params=litellm_params_dict,
             model_response=model_response,
             atranscription=atranscription,
             client=(
@@ -5156,6 +5195,7 @@ def transcription(
             api_key=api_key,
             custom_llm_provider="deepgram",
             headers={},
+            provider_config=provider_config,
         )
     if response is None:
         raise ValueError("Unmapped provider passed in. Unable to get the response.")
