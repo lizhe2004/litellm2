@@ -26,6 +26,7 @@ from typing import (
 )
 
 from litellm.constants import (
+    BASE_MCP_ROUTE,
     DEFAULT_MAX_RECURSE_DEPTH,
     DEFAULT_SLACK_ALERTING_THRESHOLD,
     LITELLM_EMBEDDING_PROVIDERS_SUPPORTING_INPUT_ARRAY_OF_TOKENS,
@@ -143,7 +144,10 @@ from litellm.litellm_core_utils.credential_accessor import CredentialAccessor
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.litellm_core_utils.sensitive_data_masker import SensitiveDataMasker
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
-from litellm.proxy._experimental.mcp_server.server import router as mcp_router
+from litellm.proxy._experimental.mcp_server.rest_endpoints import (
+    router as mcp_rest_endpoints_router,
+)
+from litellm.proxy._experimental.mcp_server.server import app as mcp_app
 from litellm.proxy._experimental.mcp_server.tool_registry import (
     global_mcp_tool_registry,
 )
@@ -417,6 +421,9 @@ except ImportError:
 server_root_path = os.getenv("SERVER_ROOT_PATH", "")
 _license_check = LicenseCheck()
 premium_user: bool = _license_check.is_premium()
+premium_user_data: Optional["EnterpriseLicenseData"] = (
+    _license_check.airgapped_license_data
+)
 global_max_parallel_request_retries_env: Optional[str] = os.getenv(
     "LITELLM_GLOBAL_MAX_PARALLEL_REQUEST_RETRIES"
 )
@@ -744,6 +751,48 @@ origins = ["*"]
 try:
     current_dir = os.path.dirname(os.path.abspath(__file__))
     ui_path = os.path.join(current_dir, "_experimental", "out")
+    litellm_asset_prefix = "/litellm-asset-prefix"
+    # Iterate through files in the UI directory
+    for root, dirs, files in os.walk(ui_path):
+        for filename in files:
+            file_path = os.path.join(root, filename)
+            # Skip binary files and files that don't need path replacement
+            if filename.endswith(
+                (
+                    ".png",
+                    ".jpg",
+                    ".jpeg",
+                    ".gif",
+                    ".ico",
+                    ".woff",
+                    ".woff2",
+                    ".ttf",
+                    ".eot",
+                )
+            ):
+                continue
+            try:
+                with open(file_path, "r", encoding="utf-8") as f:
+                    content = f.read()
+
+                # Replace the asset prefix with the server root path
+                modified_content = content.replace(
+                    f"{litellm_asset_prefix}",
+                    f"{server_root_path}",
+                )
+
+                # Replace the /.well-known/litellm-ui-config with the server root path
+                modified_content = modified_content.replace(
+                    "/litellm/.well-known/litellm-ui-config",
+                    f"{server_root_path}/.well-known/litellm-ui-config",
+                )
+
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(modified_content)
+            except UnicodeDecodeError:
+                # Skip binary files that can't be decoded
+                continue
+
     # # Mount the _next directory at the root level
     app.mount(
         "/_next",
@@ -751,38 +800,15 @@ try:
         name="next_static",
     )
     app.mount(
-        "/litellm/_next",
+        f"{litellm_asset_prefix}/_next",
         StaticFiles(directory=os.path.join(ui_path, "_next")),
         name="next_static",
     )
     # print(f"mounted _next at {server_root_path}/ui/_next")
 
     app.mount("/ui", StaticFiles(directory=ui_path, html=True), name="ui")
-    # if len(server_root_path) > 0:
-    #     app.mount(f"{server_root_path}/ui", StaticFiles(directory=ui_path, html=True), name="ui")
-    #     print(f"mounted ui at {server_root_path}/ui")
 
-    # # Add middleware to rewrite static asset paths
-    # @app.middleware("http")
-    # async def rewrite_static_paths(request: Request, call_next):
-    #     response = await call_next(request)
-
-    #     print(f"response.headers: {response.headers}, request.url.path: {request.url.path}")
-
-    #     # Only modify HTML responses from the UI
-    #     if request.url.path.startswith(f"{server_root_path}/ui"):
-    #         print(f"rewriting static paths for {request.url.path}")
-    #         content = await response.body()
-    #         # Replace /ui/_next with /litellm/ui/_next
-    #         modified_content = content.replace(b'/ui/_next', f'{server_root_path}/ui/_next'.encode())
-    #         return Response(
-    #             content=modified_content,
-    #             status_code=response.status_code,
-    #             headers=dict(response.headers),
-    #             media_type=response.media_type
-    #         )
-    #     return response
-    # Iterate through files in the UI directory
+    # Handle HTML file restructuring
     for filename in os.listdir(ui_path):
         if filename.endswith(".html") and filename != "index.html":
             # Create a folder with the same name as the HTML file
@@ -794,20 +820,6 @@ try:
             src = os.path.join(ui_path, filename)
             dst = os.path.join(folder_path, "index.html")
             os.rename(src, dst)
-
-    # if server_root_path != "":
-    #     verbose_proxy_logger.info(  # noqa
-    #         f"server_root_path is set, forwarding any /ui requests to {server_root_path}/ui, any /sso/key/generate requests to {server_root_path}/sso/key/generate"
-    #     )  # noqa
-
-    #     @app.middleware("http")
-    #     async def redirect_ui_middleware(request: Request, call_next):
-    #         if request.url.path.startswith("/ui"):
-    #             new_url = str(request.url).replace("/ui", f"{server_root_path}/ui", 1)
-    #             return RedirectResponse(new_url)
-    #         elif request.url.path == "/sso/key/generate":
-    #             return RedirectResponse(f"{server_root_path}/sso/key/generate")
-    #         return await call_next(request)
 
 except Exception:
     pass
@@ -874,9 +886,9 @@ model_max_budget_limiter = _PROXY_VirtualKeyModelMaxBudgetLimiter(
     dual_cache=user_api_key_cache
 )
 litellm.logging_callback_manager.add_litellm_callback(model_max_budget_limiter)
-redis_usage_cache: Optional[
-    RedisCache
-] = None  # redis cache used for tracking spend, tpm/rpm limits
+redis_usage_cache: Optional[RedisCache] = (
+    None  # redis cache used for tracking spend, tpm/rpm limits
+)
 user_custom_auth = None
 user_custom_key_generate = None
 user_custom_sso = None
@@ -1203,9 +1215,9 @@ async def update_cache(  # noqa: PLR0915
         _id = "team_id:{}".format(team_id)
         try:
             # Fetch the existing cost for the given user
-            existing_spend_obj: Optional[
-                LiteLLM_TeamTable
-            ] = await user_api_key_cache.async_get_cache(key=_id)
+            existing_spend_obj: Optional[LiteLLM_TeamTable] = (
+                await user_api_key_cache.async_get_cache(key=_id)
+            )
             if existing_spend_obj is None:
                 # do nothing if team not in api key cache
                 return
@@ -2770,7 +2782,8 @@ class ProxyConfig:
         """
         await self._init_guardrails_in_db(prisma_client=prisma_client)
         await self._init_vector_stores_in_db(prisma_client=prisma_client)
-        # await self._init_mcp_servers_in_db()
+        await self._init_mcp_servers_in_db()
+        await self._init_pass_through_endpoints_in_db()
 
     async def _init_guardrails_in_db(self, prisma_client: PrismaClient):
         from litellm.proxy.guardrails.guardrail_registry import (
@@ -2780,10 +2793,10 @@ class ProxyConfig:
         )
 
         try:
-            guardrails_in_db: List[
-                Guardrail
-            ] = await GuardrailRegistry.get_all_guardrails_from_db(
-                prisma_client=prisma_client
+            guardrails_in_db: List[Guardrail] = (
+                await GuardrailRegistry.get_all_guardrails_from_db(
+                    prisma_client=prisma_client
+                )
             )
             verbose_proxy_logger.debug(
                 "guardrails from the DB %s", str(guardrails_in_db)
@@ -2847,6 +2860,13 @@ class ProxyConfig:
                     str(e)
                 )
             )
+
+    async def _init_pass_through_endpoints_in_db(self):
+        from litellm.proxy.pass_through_endpoints.pass_through_endpoints import (
+            initialize_pass_through_endpoints_in_db,
+        )
+
+        await initialize_pass_through_endpoints_in_db()
 
     def decrypt_credentials(self, credential: Union[dict, BaseModel]) -> CredentialItem:
         if isinstance(credential, dict):
@@ -3003,9 +3023,9 @@ async def initialize(  # noqa: PLR0915
         user_api_base = api_base
         dynamic_config[user_model]["api_base"] = api_base
     if api_version:
-        os.environ[
-            "AZURE_API_VERSION"
-        ] = api_version  # set this for azure - litellm can read this from the env
+        os.environ["AZURE_API_VERSION"] = (
+            api_version  # set this for azure - litellm can read this from the env
+        )
     if max_tokens:  # model-specific param
         dynamic_config[user_model]["max_tokens"] = max_tokens
     if temperature:  # model-specific param
@@ -3460,12 +3480,22 @@ class ProxyStartupEvent:
         DD tracer is used to trace Python applications.
         Doc: https://docs.datadoghq.com/tracing/trace_collection/automatic_instrumentation/dd_libraries/python/
         """
-        from litellm.litellm_core_utils.dd_tracing import _should_use_dd_tracer
+        from litellm.litellm_core_utils.dd_tracing import (
+            _should_use_dd_profiler,
+            _should_use_dd_tracer,
+        )
 
         if _should_use_dd_tracer():
             import ddtrace
 
             ddtrace.patch_all(logging=True, openai=False)
+
+        if _should_use_dd_profiler():
+            from ddtrace.profiling import Profiler
+
+            prof = Profiler()
+            prof.start()
+            verbose_proxy_logger.debug("Datadog Profiler started......")
 
 
 #### API ENDPOINTS ####
@@ -3480,6 +3510,7 @@ async def model_list(
     return_wildcard_routes: Optional[bool] = False,
     team_id: Optional[str] = None,
     include_model_access_groups: Optional[bool] = False,
+    only_model_access_groups: Optional[bool] = False,
 ):
     """
     Use `/model/info` - to get detailed model information, example - pricing, mode, etc.
@@ -3495,6 +3526,15 @@ async def model_list(
     else:
         proxy_model_list = llm_router.get_model_names()
         model_access_groups = llm_router.get_model_access_groups()
+
+    ## if only_model_access_groups is True,
+    """
+    1. Get all models key/user/team has access to
+    2. Filter out models that are not model access groups
+    3. Return the models
+    """
+    if only_model_access_groups is True:
+        include_model_access_groups = True
 
     key_models = get_key_models(
         user_api_key_dict=user_api_key_dict,
@@ -3533,6 +3573,7 @@ async def model_list(
         llm_router=llm_router,
         model_access_groups=model_access_groups,
         include_model_access_groups=include_model_access_groups,
+        only_model_access_groups=only_model_access_groups,
     )
 
     return dict(
@@ -3651,9 +3692,11 @@ async def chat_completion(  # noqa: PLR0915
             return StreamingResponse(
                 selected_data_generator,
                 media_type="text/event-stream",
-                status_code=e.status_code
-                if hasattr(e, "status_code")
-                else status.HTTP_400_BAD_REQUEST,
+                status_code=(
+                    e.status_code
+                    if hasattr(e, "status_code")
+                    else status.HTTP_400_BAD_REQUEST
+                ),
             )
         _usage = litellm.Usage(prompt_tokens=0, completion_tokens=0, total_tokens=0)
         _chat_response.usage = _usage  # type: ignore
@@ -3763,9 +3806,11 @@ async def completion(  # noqa: PLR0915
                 selected_data_generator,
                 media_type="text/event-stream",
                 headers={},
-                status_code=e.status_code
-                if hasattr(e, "status_code")
-                else status.HTTP_400_BAD_REQUEST,
+                status_code=(
+                    e.status_code
+                    if hasattr(e, "status_code")
+                    else status.HTTP_400_BAD_REQUEST
+                ),
             )
         else:
             _response = litellm.TextCompletionResponse()
@@ -4221,8 +4266,16 @@ async def audio_speech(
             user_api_key_dict=user_api_key_dict,
             request_data=data,
         )
+        # Determine media type based on model type
+        media_type = "audio/mpeg"  # Default for OpenAI TTS
+        request_model = data.get("model", "")
+        if "gemini" in request_model.lower() and (
+            "tts" in request_model.lower() or "preview-tts" in request_model.lower()
+        ):
+            media_type = "audio/wav"  # Gemini TTS returns WAV format after conversion
+
         return StreamingResponse(
-            generate(response), media_type="audio/mpeg", headers=custom_headers  # type: ignore
+            generate(response), media_type=media_type, headers=custom_headers  # type: ignore
         )
 
     except Exception as e:
@@ -7840,9 +7893,9 @@ async def get_config_list(
                             hasattr(sub_field_info, "description")
                             and sub_field_info.description is not None
                         ):
-                            nested_fields[
-                                idx
-                            ].field_description = sub_field_info.description
+                            nested_fields[idx].field_description = (
+                                sub_field_info.description
+                            )
                         idx += 1
 
                     _stored_in_db = None
@@ -7955,6 +8008,95 @@ async def delete_config_general_settings(
     )
 
     return response
+
+
+@router.post(
+    "/config/callback/delete",
+    tags=["config.yaml"],
+    dependencies=[Depends(user_api_key_auth)],
+    include_in_schema=False,
+)
+async def delete_callback(
+    data: CallbackDelete,
+    user_api_key_dict: UserAPIKeyAuth = Depends(user_api_key_auth),
+):
+    """
+    Delete specific logging callback from configuration.
+    """
+    global prisma_client, proxy_config
+    
+    if prisma_client is None:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": CommonProxyErrors.db_not_connected_error.value},
+        )
+
+    if user_api_key_dict.user_role != LitellmUserRoles.PROXY_ADMIN:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "{}, your role={}".format(
+                    CommonProxyErrors.not_allowed_access.value,
+                    user_api_key_dict.user_role,
+                )
+            },
+        )
+
+    if store_model_in_db is not True:
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "Set `'STORE_MODEL_IN_DB='True'` in your env to enable this feature."
+            },
+        )
+
+    try:
+        # Get current configuration
+        config = await proxy_config.get_config()
+        callback_name = data.callback_name.lower()
+        
+        # Check if callback exists in current configuration
+        litellm_settings = config.get("litellm_settings", {})
+        success_callbacks = litellm_settings.get("success_callback", [])
+        
+        if callback_name not in success_callbacks:
+            raise HTTPException(
+                status_code=404,
+                detail={"error": f"Callback '{callback_name}' not found in active configuration"},
+            )
+        
+        # Remove callback from success_callback list
+        success_callbacks.remove(callback_name)
+        config.setdefault("litellm_settings", {})["success_callback"] = success_callbacks
+        
+        # Save the updated configuration
+        await proxy_config.save_config(new_config=config)
+        
+        # Restart the proxy to apply changes
+        await proxy_config.add_deployment(
+            prisma_client=prisma_client, proxy_logging_obj=proxy_logging_obj
+        )
+
+        return {
+            "message": f"Successfully deleted callback: {callback_name}",
+            "removed_callback": callback_name,
+            "remaining_callbacks": success_callbacks,
+            "deleted_at": datetime.now().isoformat(),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        verbose_proxy_logger.error(
+            f"litellm.proxy.proxy_server.delete_callback(): Exception occurred - {str(e)}"
+        )
+        verbose_proxy_logger.debug(traceback.format_exc())
+        raise ProxyException(
+            message="Error deleting callback: " + str(e),
+            type=ProxyErrorTypes.internal_server_error,
+            param="callback_name",
+            code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
 
 @router.get(
@@ -8252,7 +8394,6 @@ app.include_router(image_router)
 app.include_router(fine_tuning_router)
 app.include_router(credential_router)
 app.include_router(llm_passthrough_router)
-app.include_router(mcp_router)
 app.include_router(mcp_management_router)
 app.include_router(anthropic_router)
 app.include_router(langfuse_router)
@@ -8278,3 +8419,8 @@ app.include_router(model_management_router)
 app.include_router(tag_management_router)
 app.include_router(enterprise_router)
 app.include_router(ui_discovery_endpoints_router)
+########################################################
+# MCP Server
+########################################################
+app.mount(path=BASE_MCP_ROUTE, app=mcp_app)
+app.include_router(mcp_rest_endpoints_router)
